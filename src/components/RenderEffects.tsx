@@ -55,7 +55,12 @@ import type { Quality } from '../render/quality'
 import { backendOf } from '../render/renderer'
 import { TraceSession } from '../render/session'
 import { textureProgress } from '../render/progress'
-import { setPrerenderProgress, setSpinStatus, setTraceStatus } from '../render/traceStatus'
+import {
+  setAngleThumbnail,
+  setPrerenderProgress,
+  setSpinStatus,
+  setTraceStatus,
+} from '../render/traceStatus'
 import { mark, markOnce } from '../render/timeline'
 
 /** Median frame time (ms) of a settle run above which a tier is too heavy for this device. */
@@ -151,6 +156,32 @@ export function RenderEffects({
     const capture = pending.current
     pending.current = null
     capture?.resolvers.forEach((resolve) => resolve(image))
+  }
+  // Thumbnails for the angle strip: the design version a thumbnail was taken for, per angle
+  // ("final" stills count as a later version so they replace a preview or a raster snapshot).
+  const thumbDesign = useRef(1)
+  const thumbTaken = useRef(new Map<string, string>())
+  const thumbCanvas = useRef<HTMLCanvasElement | null>(null)
+  const thumbnail = (
+    angle: string,
+    source: CanvasImageSource,
+    w: number,
+    h: number,
+    tag: string,
+  ) => {
+    if (thumbTaken.current.get(angle) === tag) return
+    const canvas = (thumbCanvas.current ??= document.createElement('canvas'))
+    canvas.width = 192
+    canvas.height = Math.max(1, Math.round((192 * h) / w))
+    const context = canvas.getContext('2d')
+    if (!context) return
+    try {
+      context.drawImage(source, 0, 0, canvas.width, canvas.height)
+      thumbTaken.current.set(angle, tag)
+      setAngleThumbnail(angle, { url: canvas.toDataURL('image/jpeg', 0.82), design: tag })
+    } catch {
+      /* A tainted or unavailable source: the tile keeps its placeholder. */
+    }
   }
 
   useEffect(() => {
@@ -293,6 +324,7 @@ export function RenderEffects({
   useEffect(() => {
     changed.current = true
     sceneDirty.current = true
+    thumbDesign.current++
     invalidate()
   }, [config, view, dimensions, invalidate])
 
@@ -545,6 +577,17 @@ export function RenderEffects({
         spinning.session.hold(
           t < 1 && current.from ? [current.frame.texture, current.from] : [current.frame.texture],
         )
+        if (spinning.kind === 'showroom' && showroom && spinning.session.isFocus(current.frame)) {
+          const image = current.frame.texture.image as ImageBitmap
+          if (image?.width)
+            thumbnail(
+              showroom.angle,
+              image,
+              image.width,
+              image.height,
+              `${current.frame.design}|${current.frame.final ? 'final' : 'preview'}`,
+            )
+        }
         if (t < 1) invalidate()
         const capture = pending.current
         // The full-quality frame of the view itself, not the nearest one standing in for it.
@@ -629,6 +672,11 @@ export function RenderEffects({
     fresh.current = true
     settle.current--
     still.current++
+    // A settled real-time frame of a posed angle stands in for its thumbnail until a still does.
+    if (showroom && !stills && settle.current <= 0) {
+      const el = renderer.domElement
+      thumbnail(showroom.angle, el, el.width, el.height, `raster-${thumbDesign.current}`)
+    }
     if (settle.current > 0) invalidate()
     if (tracer) {
       if (!restTimer.current && (settle.current <= 0 || still.current >= TRACE_AFTER_FRAMES))

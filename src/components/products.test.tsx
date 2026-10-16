@@ -18,6 +18,7 @@ const panel = (config: Config, step: number) =>
       trace
       setTrace={vi.fn()}
       traceSupported
+      explore={false}
       notify={vi.fn()}
       onPlan={vi.fn()}
       onSignature={vi.fn()}

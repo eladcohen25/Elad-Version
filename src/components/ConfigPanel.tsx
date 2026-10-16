@@ -57,7 +57,7 @@ import {
   productFamily,
 } from '../lib/products'
 import { Elevation } from './Elevation'
-import { TIME_PRESETS, exploreEnabled, timePreset } from '../render/angles'
+import { TIME_PRESETS, timePreset } from '../render/angles'
 
 const STEPS = ['Space', 'Exterior', 'Interior', 'Setting']
 
@@ -127,6 +127,7 @@ export default function ConfigPanel({
   trace,
   setTrace,
   traceSupported,
+  explore,
   notify,
   onPlan,
   onSignature,
@@ -143,6 +144,8 @@ export default function ConfigPanel({
   setTrace: (trace: boolean) => void
   /** Path tracing needs WebGPU compute. */
   traceSupported: boolean
+  /** 360° view: the full time-of-day slider is offered besides the presets. */
+  explore: boolean
   notify: (message: string) => void
   onPlan: () => void
   onSignature: (id: SignatureId) => void
@@ -762,7 +765,7 @@ export default function ConfigPanel({
                 </button>
               ))}
             </div>
-            {exploreEnabled() && (
+            {explore && (
               <>
                 <input
                   className="time-slider"

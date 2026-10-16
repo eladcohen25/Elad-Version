@@ -25,7 +25,7 @@ import {
   type GridPose,
 } from '../render/orbit'
 import { cloudUrl, spinEnabled, useSpinFailed } from '../render/traceStatus'
-import { angleById, exploreEnabled } from '../render/angles'
+import { angleById } from '../render/angles'
 import {
   SPIN_LEVELS,
   SPIN_STEPS,
@@ -213,6 +213,7 @@ function CameraRig({
     az,
     angleEye,
     angleZoom,
+    posed,
     invalidate,
     spinning,
     proxy,
@@ -435,6 +436,7 @@ export default function Scene({
   reset,
   camera = [0.48, 0.24, 0.84],
   angle,
+  explore,
   autoRotate,
   quality,
   trace,
@@ -451,6 +453,8 @@ export default function Scene({
   camera?: [number, number, number]
   /** The showroom angle being looked at (angles.ts); null in explore mode. */
   angle: string | null
+  /** 360° view: the free orbit (and, with a cloud, the spin) instead of the fixed angles. */
+  explore: boolean
   autoRotate: boolean
   quality: Quality
   /** Refine resting views with the path tracer where WebGPU allows. */
@@ -470,7 +474,6 @@ export default function Scene({
   const spinFailed = useSpinFailed()
   // The showroom (angles.ts) is the default: fixed angles, with the cloud's stills when it is
   // configured. Explore mode brings back the orbit, and with a cloud the spin (or `?spin=0`).
-  const explore = exploreEnabled()
   const spin = explore && cloud && spinEnabled() && !spinFailed
   const snap = explore && cloud && !spinEnabled()
   const showroom =
