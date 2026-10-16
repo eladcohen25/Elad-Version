@@ -12,7 +12,7 @@ name: Deploy render server
 #   FURY_APP_NAME          Modal app name, default fury-render
 #   FURY_GPU               default L40S (one per visitor session)
 #   FURY_MAX_SESSIONS      default 3
-#   FURY_IDLE_SECONDS      default 600 (a GPU stays warm 10 min after its last request)
+#   FURY_IDLE_SECONDS      default 180 (a GPU stays warm 3 min after its last request)
 on:
   push:
     branches: [main, showroom]
@@ -39,7 +39,7 @@ jobs:
       FURY_APP_NAME: ${{ vars.FURY_APP_NAME || 'fury-render' }}
       FURY_GPU: ${{ vars.FURY_GPU || 'L40S' }}
       FURY_MAX_SESSIONS: ${{ vars.FURY_MAX_SESSIONS || '3' }}
-      FURY_IDLE_SECONDS: ${{ vars.FURY_IDLE_SECONDS || '600' }}
+      FURY_IDLE_SECONDS: ${{ vars.FURY_IDLE_SECONDS || '180' }}
       FURY_FRAME_BUCKET: ${{ secrets.FURY_FRAME_BUCKET }}
       FURY_FRAME_ENDPOINT: ${{ secrets.FURY_FRAME_ENDPOINT }}
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}

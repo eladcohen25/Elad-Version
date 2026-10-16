@@ -28,7 +28,7 @@ import { mark, markOnce, now as timelineNow, resetOnce, timelineEnabled } from '
 
 /** Frame quality: a quick preview, then the full render. */
 const PREVIEW = { samples: 64, threshold: 0.05, timeLimit: 3 }
-const FINAL = { samples: 256, threshold: 0.03, timeLimit: 6 }
+const FINAL = { samples: 256, threshold: 0.03, timeLimit: 10 }
 /** The exposure meter's frame: denoised, its mean brightness settles within a few samples. */
 const METER = { samples: 16, threshold: 0, timeLimit: 4 }
 /** Requests kept open besides the one for the angle being looked at. */
@@ -46,8 +46,11 @@ export type AngleFrame = {
   id: string
   view: 'exterior' | 'interior'
   camera: CloudCamera
+  /** The preview's size; the full-quality still is rendered at finalWidth × finalHeight. */
   width: number
   height: number
+  finalWidth: number
+  finalHeight: number
 }
 
 export type ShowroomState = {
@@ -323,8 +326,8 @@ export class ShowroomSession {
         captured,
         {
           camera: job.frame.camera,
-          width: job.frame.width,
-          height: job.frame.height,
+          width: job.final ? job.frame.finalWidth : job.frame.width,
+          height: job.final ? job.frame.finalHeight : job.frame.height,
           quality: job.quality,
           priority: job.priority,
           finish,

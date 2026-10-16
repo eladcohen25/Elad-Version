@@ -456,6 +456,8 @@ export function RenderEffects({
             },
             width: still.width,
             height: still.height,
+            finalWidth: still.finalWidth,
+            finalHeight: still.finalHeight,
           }
         })
         const state: ShowroomState = {

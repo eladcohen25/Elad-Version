@@ -81,7 +81,13 @@ describe('time presets', () => {
 
 describe('still sizes', () => {
   it('renders at a fixed width for the nearest aspect bucket', () => {
-    expect(frameSize(1920, 1080)).toEqual({ width: 1440, height: 808, aspect: 1.778 })
+    expect(frameSize(1920, 1080)).toEqual({
+      width: 1440,
+      height: 808,
+      finalWidth: 2160,
+      finalHeight: 1216,
+      aspect: 1.778,
+    })
     expect(frameSize(1512, 982)).toMatchObject({ width: 1440, aspect: 1.5 })
     expect(frameSize(390, 844)).toMatchObject({ width: 900, aspect: 0.5625 })
     for (const aspect of FRAME_ASPECTS) expect(frameSize(aspect * 1000, 1000).aspect).toBe(aspect)

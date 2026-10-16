@@ -131,16 +131,25 @@ export function timePreset(time: number): TimePreset | null {
  * (cropping a sliver at the edges) rather than being re-rendered for every pixel size.
  */
 export const FRAME_ASPECTS = [2.333, 1.778, 1.6, 1.5, 1.333, 1, 0.75, 0.5625] as const
-const LANDSCAPE_WIDTH = 1440
-const PORTRAIT_WIDTH = 900
+/** Preview stills: quick, upscaled on a Retina screen. Final stills: about native 2x density. */
+const PREVIEW_WIDTH = { landscape: 1440, portrait: 900 }
+const FINAL_WIDTH = { landscape: 2160, portrait: 1350 }
 
 export function frameSize(width: number, height: number) {
   const aspect = width / Math.max(1, height)
   let best: number = FRAME_ASPECTS[0]
   for (const candidate of FRAME_ASPECTS)
     if (Math.abs(Math.log(candidate / aspect)) < Math.abs(Math.log(best / aspect))) best = candidate
-  const w = best >= 1 ? LANDSCAPE_WIDTH : PORTRAIT_WIDTH
-  return { width: w, height: Math.round(w / best / 8) * 8, aspect: best }
+  const orientation = best >= 1 ? 'landscape' : 'portrait'
+  const w = PREVIEW_WIDTH[orientation]
+  const fw = FINAL_WIDTH[orientation]
+  return {
+    width: w,
+    height: Math.round(w / best / 8) * 8,
+    finalWidth: fw,
+    finalHeight: Math.round(fw / best / 8) * 8,
+    aspect: best,
+  }
 }
 
 /**

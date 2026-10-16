@@ -65,6 +65,8 @@ function frames(): AngleFrame[] {
     },
     width: 1440,
     height: 900,
+    finalWidth: 2160,
+    finalHeight: 1350,
   }))
 }
 function state(angle = ANGLES[0].id): ShowroomState {
