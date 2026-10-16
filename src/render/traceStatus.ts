@@ -131,6 +131,13 @@ export function useSpinStatus() {
   return useSyncExternalStore(subscribeSpin, spinStatus, spinStatus)
 }
 
+const never = () => () => {}
+
+/** The spin status, re-rendering the caller only while `active` (the pre-warm, say). */
+export function useSpinStatusWhen(active: boolean) {
+  return useSyncExternalStore(active ? subscribeSpin : never, spinStatus, spinStatus)
+}
+
 const spinFailed = () => spin.failed
 
 /** Whether the spin failed; unlike useSpinStatus, progress does not re-render the caller. */

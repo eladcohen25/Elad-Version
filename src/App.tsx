@@ -63,6 +63,7 @@ import {
   requestedTrace,
   usePrerenderProgress,
   useSpinStatus,
+  useSpinStatusWhen,
   useTraceStatus,
 } from './render/traceStatus'
 import { textureProgress } from './render/progress'
@@ -662,9 +663,10 @@ function usePrewarm(
   setAngle: (angle: string) => void,
   setView: (view: View) => void,
 ) {
-  const spin = useSpinStatus()
   const designs = useMemo(() => prewarmDesigns(), [])
   const range = useMemo(() => prewarmRange(designs.length), [designs.length])
+  // Subscribed only while pre-warming, so the whole app never re-renders on frame arrivals.
+  const spin = useSpinStatusWhen(range !== null)
   const at = useRef(range ? range[0] : 0)
   const startedAt = useRef(0)
   const applied = useRef(false)
