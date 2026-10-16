@@ -65,6 +65,15 @@ Stop a test with `modal app stop <app-name>` and confirm zero tasks with `modal 
 Never raise gateway `max_containers` above 1 without replacing the in-memory limits and the
 session registry with shared durable counters.
 
+## Deploying from GitHub
+
+`.github/workflows/deploy-render-server.yml` runs `modal deploy` on every push to `main` or
+`showroom` that touches `render-server/`, and on demand (Actions → Deploy render server → Run
+workflow). It needs two repository secrets, `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` (Modal
+dashboard → Settings → API tokens); the optional frame-store secrets and the `FURY_*` variables
+are listed at the top of the workflow. The job summary prints the gateway URL to set as
+`VITE_CLOUD_RENDER_URL` on Vercel.
+
 ## Frame store
 
 Showroom stills (src/render/angles.ts) are fixed cameras, so a finished frame is the right image for

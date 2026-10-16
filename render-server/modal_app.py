@@ -37,7 +37,7 @@ FRAME_STORE = modal.Secret.from_dict(
             "AWS_ACCESS_KEY_ID",
             "AWS_SECRET_ACCESS_KEY",
         )
-        if name in os.environ
+        if os.environ.get(name)
     }
 )
 
