@@ -38,6 +38,8 @@ import {
   type RasterMeter,
   type SpinState,
 } from '../render/spin'
+import { ANGLES, coverFit, frameSize, type Vec3 } from '../render/angles'
+import { ShowroomSession, type AngleFrame, type ShowroomState } from '../render/showroom'
 import { INTERIOR_EXPOSURE } from './Atmosphere'
 import { onMaterialsChanged } from '../render/materials'
 import {
@@ -90,6 +92,7 @@ export function RenderEffects({
   view,
   dimensions,
   spin,
+  showroom,
   onCaptureReady,
   onSlow,
 }: {
@@ -102,6 +105,12 @@ export function RenderEffects({
   dimensions: boolean
   /** Show the cloud's path-traced spin and panorama (spin.ts). */
   spin: boolean
+  /**
+   * The showroom (angles.ts): the angle being looked at and the build's hero direction. With a
+   * cloud renderer its stills replace the raster frame as they arrive (showroom.ts); without one
+   * the angles are simply fixed cameras for the real-time renderer and the local tracer.
+   */
+  showroom: { angle: string; hero: Vec3; cloud: boolean } | null
   onCaptureReady: (capture: Capture) => void
   /** Called once per tier when consecutive frames are consistently slow. */
   onSlow?: () => void
@@ -162,9 +171,11 @@ export function RenderEffects({
   // The local tracer loads on demand, and only where WebGPU compute is available. With a cloud
   // renderer, light devices leave all tracing to it.
   const remote = useMemo(() => cloudUrl(), [])
-  // The spin replaces both while it works.
-  const cloudAvailable = trace && remote !== null && !spin
-  const localAvailable = webgpu && trace && !spin && (quality !== 'lite' || !cloudAvailable)
+  // The spin, or the showroom's cloud stills, replace both while they work.
+  const stills = !!showroom?.cloud && remote !== null
+  const cloudAvailable = trace && remote !== null && !spin && !stills
+  const localAvailable =
+    webgpu && trace && !spin && !stills && (quality !== 'lite' || !cloudAvailable)
   useEffect(() => {
     if (!localAvailable && !cloudAvailable) return
     let active = true
@@ -216,11 +227,21 @@ export function RenderEffects({
 
   // The spin: its session, the pass that shows its frames, and a meter for the raster frame's
   // brightness, which the spin's exposure matches once per lighting look.
-  const spinner = useRef<{
-    session: SpinSession
-    present: ReturnType<typeof createSpinPresent>
-    meter: ReturnType<typeof createExposureMeter>
-  } | null>(null)
+  const spinner = useRef<
+    | {
+        kind: 'spin'
+        session: SpinSession
+        present: ReturnType<typeof createSpinPresent>
+        meter: ReturnType<typeof createExposureMeter>
+      }
+    | {
+        kind: 'showroom'
+        session: ShowroomSession
+        present: ReturnType<typeof createSpinPresent>
+        meter: ReturnType<typeof createExposureMeter>
+      }
+    | null
+  >(null)
   /** What the spin shows: a frame, and the one it fades from. */
   const spinShown = useRef<{
     frame: Decoded | null
@@ -235,13 +256,23 @@ export function RenderEffects({
     { camera: CloudCamera | null; resolve: (meter: Promise<RasterMeter>) => void }[]
   >([])
   useEffect(() => {
-    if (!spin || !remote) return
+    if ((!spin && !stills) || !remote) return
     const placeholder = new DataTexture(new Uint16Array(4), 1, 1, RGBAFormat, HalfFloatType)
-    const created = {
-      session: new SpinSession(new CloudClient(remote), invalidate),
-      present: createSpinPresent(renderer),
-      meter: createExposureMeter(renderer, placeholder),
-    }
+    const present = createSpinPresent(renderer)
+    const meter = createExposureMeter(renderer, placeholder)
+    const created = stills
+      ? ({
+          kind: 'showroom',
+          session: new ShowroomSession(new CloudClient(remote), invalidate),
+          present,
+          meter,
+        } as const)
+      : ({
+          kind: 'spin',
+          session: new SpinSession(new CloudClient(remote), invalidate),
+          present,
+          meter,
+        } as const)
     spinner.current = created
     sceneDirty.current = true
     invalidate()
@@ -256,7 +287,7 @@ export function RenderEffects({
       changed.current = true
       invalidate()
     }
-  }, [spin, remote, renderer, invalidate])
+  }, [spin, stills, remote, renderer, invalidate])
 
   // Any edit to the design hands the frame back to the rasterizer and re-captures before tracing.
   useEffect(() => {
@@ -357,51 +388,85 @@ export function RenderEffects({
       }
       const looking = view === 'interior' ? 'interior' : 'exterior'
       const textures = textureProgress.get()
-      const state: SpinState = {
-        active: looking,
-        exterior:
-          spinView.spec && spinView.pose
-            ? {
-                spec: spinView.spec,
-                pose: spinView.pose,
-                width: size.x,
-                height: size.y,
-                lens: { fov: EXTERIOR_FOV, near: cam.near, far: cam.far },
-              }
-            : null,
-        interior: {
-          eye: new Vector3(...inside.position),
-          width: Math.min(8192, Math.max(2048, panoramaWidth)),
-          lens: { fov: inside.fov, near: cam.near, far: cam.far },
-          view: {
-            matrix: meterMatrix
-              .lookAt(
-                meterEye.set(...inside.position),
-                meterTarget.set(...inside.target),
-                camera.up,
-              )
-              .setPosition(meterEye)
-              .toArray(),
-            fov: inside.fov,
-            near: cam.near,
-            far: cam.far,
+      const rasterKey = (at: CloudCamera | null) =>
+        new Promise<RasterMeter>((resolve) => {
+          meterWanted.current.push({ camera: at, resolve })
+          invalidate()
+        })
+      // Scanned materials still streaming in: the stills wait for them (each arrival redraws).
+      const settled = textures.loaded >= textures.requested
+      if (spinning.kind === 'showroom') {
+        // Every angle's camera, as CameraRig frames it, at the still size for this screen.
+        const still = frameSize(size.x, size.y)
+        const frames: AngleFrame[] = ANGLES.map((angle) => {
+          const framing = cameraFraming(
+            config,
+            angle.view,
+            angle.direction ?? showroom!.hero,
+            still.aspect,
+            { eye: angle.eye, zoom: angle.zoom },
+          )
+          return {
+            id: angle.id,
+            view: angle.view,
+            camera: {
+              matrix: meterMatrix
+                .lookAt(
+                  meterEye.set(...framing.position),
+                  meterTarget.set(...framing.target),
+                  camera.up,
+                )
+                .setPosition(meterEye)
+                .toArray(),
+              fov: framing.fov,
+              near: cam.near,
+              far: cam.far,
+            },
+            width: still.width,
+            height: still.height,
+          }
+        })
+        const state: ShowroomState = {
+          angle: showroom!.angle,
+          frames,
+          exposure: { exterior: outside, interior: outside * INTERIOR_EXPOSURE },
+        }
+        spinning.session.sync(scene, lookRef.current, sceneKey.current, state, rasterKey, settled)
+      } else {
+        const state: SpinState = {
+          active: looking,
+          exterior:
+            spinView.spec && spinView.pose
+              ? {
+                  spec: spinView.spec,
+                  pose: spinView.pose,
+                  width: size.x,
+                  height: size.y,
+                  lens: { fov: EXTERIOR_FOV, near: cam.near, far: cam.far },
+                }
+              : null,
+          interior: {
+            eye: new Vector3(...inside.position),
+            width: Math.min(8192, Math.max(2048, panoramaWidth)),
+            lens: { fov: inside.fov, near: cam.near, far: cam.far },
+            view: {
+              matrix: meterMatrix
+                .lookAt(
+                  meterEye.set(...inside.position),
+                  meterTarget.set(...inside.target),
+                  camera.up,
+                )
+                .setPosition(meterEye)
+                .toArray(),
+              fov: inside.fov,
+              near: cam.near,
+              far: cam.far,
+            },
           },
-        },
-        exposure: { exterior: outside, interior: outside * INTERIOR_EXPOSURE },
+          exposure: { exterior: outside, interior: outside * INTERIOR_EXPOSURE },
+        }
+        spinning.session.sync(scene, lookRef.current, sceneKey.current, state, rasterKey, settled)
       }
-      spinning.session.sync(
-        scene,
-        lookRef.current,
-        sceneKey.current,
-        state,
-        (at) =>
-          new Promise<RasterMeter>((resolve) => {
-            meterWanted.current.push({ camera: at, resolve })
-            invalidate()
-          }),
-        // Scanned materials still streaming in: the spin waits for them (each arrival is redrawn).
-        textures.loaded >= textures.requested,
-      )
       if (meterWanted.current.length) {
         // The raster frame for this look at each camera asked for (the interior's while the
         // visitor is outside: only the camera and exposure differ between views), rendered a few
@@ -459,18 +524,23 @@ export function RenderEffects({
       // Until the next frame is decoded the last one stays, in the same view only.
       if (current.frame && current.mode === looking) {
         const t = current.from ? Math.min(1, (now - current.start) / 300) : 1
+        const image = current.frame.texture.image as { width?: number; height?: number }
         spinning.present.render({
           from: t < 1 ? current.from : null,
           to: current.frame.texture,
           t,
           panorama:
-            looking === 'interior'
+            spinning.kind === 'spin' && looking === 'interior'
               ? {
                   rotation: spinRotation.setFromMatrix4(camera.matrixWorld),
                   tanHalfFov: Math.tan((cam.fov * Math.PI) / 360),
                   aspect: cam.aspect,
                 }
               : null,
+          fit:
+            spinning.kind === 'showroom' && image.width && image.height
+              ? coverFit(image.width / image.height, size.x / size.y)
+              : undefined,
         })
         spinning.session.hold(
           t < 1 && current.from ? [current.frame.texture, current.from] : [current.frame.texture],
@@ -485,7 +555,7 @@ export function RenderEffects({
         setSpinStatus({
           active: true,
           ...spinning.session.progress,
-          panorama: looking === 'interior',
+          panorama: spinning.kind === 'spin' && looking === 'interior',
           showing: true,
         })
         return
@@ -493,7 +563,7 @@ export function RenderEffects({
       setSpinStatus({
         active: true,
         ...spinning.session.progress,
-        panorama: looking === 'interior',
+        panorama: spinning.kind === 'spin' && looking === 'interior',
         showing: false,
       })
       // Nothing path traced to show yet: the raster frame, which the exposure meter also reads.

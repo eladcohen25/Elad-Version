@@ -57,6 +57,7 @@ import {
   productFamily,
 } from '../lib/products'
 import { Elevation } from './Elevation'
+import { TIME_PRESETS, exploreEnabled, timePreset } from '../render/angles'
 
 const STEPS = ['Space', 'Exterior', 'Interior', 'Setting']
 
@@ -747,24 +748,42 @@ export default function ConfigPanel({
                 {Math.floor(c.time)}:{String(Math.round((c.time % 1) * 60)).padStart(2, '0')}
               </span>
             </div>
-            <input
-              className="time-slider"
-              type="range"
-              min="6"
-              max="21"
-              step="0.25"
-              value={c.time}
-              aria-label="Time of day"
-              onChange={(e) => onChange({ ...c, time: Number(e.target.value) })}
-            />
-            <div className="time-labels">
-              <span>
-                <Sun size={13} /> Morning
-              </span>
-              <span>
-                <Moon size={13} /> After dark
-              </span>
+            <div className="time-presets" role="group" aria-label="Time of day">
+              {TIME_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  aria-pressed={timePreset(c.time) === preset.id}
+                  className={timePreset(c.time) === preset.id ? 'active' : ''}
+                  onClick={() => onChange({ ...c, time: preset.time })}
+                >
+                  {preset.id === 'night' ? <Moon size={13} /> : <Sun size={13} />}
+                  <span>{preset.label}</span>
+                </button>
+              ))}
             </div>
+            {exploreEnabled() && (
+              <>
+                <input
+                  className="time-slider"
+                  type="range"
+                  min="6"
+                  max="21"
+                  step="0.25"
+                  value={c.time}
+                  aria-label="Time of day"
+                  onChange={(e) => onChange({ ...c, time: Number(e.target.value) })}
+                />
+                <div className="time-labels">
+                  <span>
+                    <Sun size={13} /> Morning
+                  </span>
+                  <span>
+                    <Moon size={13} /> After dark
+                  </span>
+                </div>
+              </>
+            )}
             <Toggle
               label="Architectural lighting"
               detail="A warm welcome, any time of day."

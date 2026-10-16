@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -65,6 +66,14 @@ import {
 } from './render/traceStatus'
 import { textureProgress } from './render/progress'
 import { mark } from './render/timeline'
+import {
+  ANGLES,
+  DEFAULT_ANGLE,
+  angleById,
+  exploreEnabled,
+  firstAngle,
+  stepAngle,
+} from './render/angles'
 
 const Scene = lazy(() =>
   import('./components/Scene').then((m) => {
@@ -107,6 +116,15 @@ export default function App() {
     [photoMode, setPhotoMode] = useState(false),
     [mobilePanel, setMobilePanel] = useState(true)
   const [camera, setCamera] = useState<[number, number, number]>(DEFAULT_CAMERA)
+  // The showroom: a strip of composed camera angles (angles.ts). `?explore=1` frees the orbit.
+  const explore = useMemo(() => exploreEnabled(), [])
+  const [angle, setAngle] = useState(DEFAULT_ANGLE)
+  const showAngle = useCallback((id: string) => {
+    const next = angleById(id)
+    setAngle(next.id)
+    setView(next.view)
+    setAutoRotate(false)
+  }, [])
   const captureRef = useRef<(() => Promise<string>) | null>(null),
     timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const notify = useCallback((s: string) => {
@@ -161,10 +179,14 @@ export default function App() {
         else undo()
       }
       if (e.key === 'Escape') setPhotoMode(false)
+      if (!explore && view !== 'plan' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault()
+        showAngle(stepAngle(angle, e.key === 'ArrowRight' ? 1 : -1).id)
+      }
     }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
-  }, [dialog, undo, redo])
+  }, [dialog, undo, redo, explore, view, angle, showAngle])
   const signature = (id: SignatureId) => {
     const build = SIGNATURES.find((s) => s.id === id)!
     if (
@@ -176,6 +198,7 @@ export default function App() {
     setConfig(structuredClone(build.config))
     setCamera(build.camera)
     setView('exterior')
+    setAngle(DEFAULT_ANGLE)
     setReset((r) => r + 1)
     notify(`${build.name} applied. Every option stays editable; the build still requires a quote.`)
   }
@@ -267,6 +290,7 @@ export default function App() {
                 unit={unit}
                 reset={reset}
                 camera={camera}
+                angle={explore ? null : angle}
                 autoRotate={autoRotate}
                 quality={quality}
                 trace={trace}
@@ -277,7 +301,7 @@ export default function App() {
               />
             </Suspense>
           )}
-          {view !== 'plan' && <SpinLoading />}
+          {view !== 'plan' && <SpinLoading compact={!explore} />}
           <div className="stage-heading">
             <span className="eyebrow">
               <span className="small-line" />{' '}
@@ -314,8 +338,11 @@ export default function App() {
                   aria-pressed={view === v}
                   className={view === v ? 'active' : ''}
                   onClick={() => {
-                    setView(v)
-                    setAutoRotate(false)
+                    if (v !== 'plan' && !explore) showAngle(firstAngle(v).id)
+                    else {
+                      setView(v)
+                      setAutoRotate(false)
+                    }
                     if (v === 'plan') setStep(2)
                   }}
                 >
@@ -338,22 +365,28 @@ export default function App() {
             </button>
             <button
               aria-label="Reset camera"
-              onClick={() => setReset((r) => r + 1)}
+              onClick={() => {
+                if (!explore)
+                  showAngle(view === 'interior' ? firstAngle('interior').id : DEFAULT_ANGLE)
+                setReset((r) => r + 1)
+              }}
               disabled={view === 'plan'}
             >
               <RotateCcw size={17} />
               <span>Reset view</span>
             </button>
-            <button
-              className={autoRotate ? 'active' : ''}
-              aria-label={autoRotate ? 'Pause rotation' : 'Rotate automatically'}
-              aria-pressed={autoRotate}
-              disabled={view !== 'exterior'}
-              onClick={() => setAutoRotate(!autoRotate)}
-            >
-              {autoRotate ? <Pause size={17} /> : <Play size={17} />}
-              <span>Auto rotate</span>
-            </button>
+            {explore && (
+              <button
+                className={autoRotate ? 'active' : ''}
+                aria-label={autoRotate ? 'Pause rotation' : 'Rotate automatically'}
+                aria-pressed={autoRotate}
+                disabled={view !== 'exterior'}
+                onClick={() => setAutoRotate(!autoRotate)}
+              >
+                {autoRotate ? <Pause size={17} /> : <Play size={17} />}
+                <span>Auto rotate</span>
+              </button>
+            )}
             <span className="tool-divider" />
             <button
               aria-label="Enter photo mode"
@@ -387,6 +420,21 @@ export default function App() {
             </div>
           )}
           {view !== 'plan' && <MaterialProgress />}
+          {view !== 'plan' && !explore && !photoMode && (
+            <div className="angle-strip" role="tablist" aria-label="Camera angles">
+              {ANGLES.map((a) => (
+                <button
+                  key={a.id}
+                  role="tab"
+                  aria-selected={angle === a.id}
+                  className={`angle ${angle === a.id ? 'active' : ''} ${a.view}`}
+                  onClick={() => showAngle(a.id)}
+                >
+                  <span>{a.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {view !== 'plan' && (
             <div className="stage-bottom">
               <div className="scene-status">
@@ -401,7 +449,11 @@ export default function App() {
                 <span>Concept visualization · Not manufacturer CAD</span>
               </div>
               <div className="scene-hint">
-                {view === 'interior' ? 'Drag to look around' : 'Drag to orbit · Scroll to explore'}
+                {explore
+                  ? view === 'interior'
+                    ? 'Drag to look around'
+                    : 'Drag to orbit · Scroll to explore'
+                  : 'Choose an angle · Arrow keys step through'}
               </div>
               <button className="environment-quick" onClick={() => setStep(3)}>
                 <Leaf size={14} />
@@ -565,6 +617,7 @@ export default function App() {
                 setConfig(structuredClone(DEFAULT_CONFIG))
                 setCamera(DEFAULT_CAMERA)
                 setView('exterior')
+                setAngle(DEFAULT_ANGLE)
                 setReset((r) => r + 1)
                 close()
                 notify('Your design is reset. Undo is available.')
@@ -584,7 +637,7 @@ export default function App() {
  * previews, and later whenever a view has no path-traced frame yet (the interior's first visit,
  * say). It gives up after a minute and a half.
  */
-function SpinLoading() {
+function SpinLoading({ compact = false }: { compact?: boolean }) {
   const spin = useSpinStatus()
   const [opened, setOpened] = useState(false)
   const done = spin.active && !spin.loading
@@ -593,6 +646,14 @@ function SpinLoading() {
   }, [done])
   const waiting = spin.active && !spin.failed && spin.loading && (!opened || !spin.showing)
   if (!waiting) return null
+  // The showroom never covers the scene: the real-time frame shows while the still renders.
+  if (compact)
+    return (
+      <div className="still-pill" role="status" aria-live="polite">
+        <span className="still-pill-dot" />
+        Rendering photoreal still
+      </div>
+    )
   const progress = spin.panorama ? null : spin.waitReady / Math.max(1, spin.waitTotal)
   return (
     <div className={`spin-loading ${opened ? 'later' : ''}`} role="status" aria-live="polite">
