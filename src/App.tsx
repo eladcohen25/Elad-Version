@@ -3,28 +3,32 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
 } from 'react'
 import {
   ArrowDownToLine,
+  ArrowLeft,
   ArrowRight,
   Bookmark,
-  Camera,
   Check,
   ChevronDown,
+  ChevronUp,
   CircleHelp,
   Expand,
   ExternalLink,
   Eye,
-  Leaf,
   Maximize,
+  Maximize2,
+  Menu,
   Minus,
   Pause,
   Play,
   Plus,
   Redo2,
+  Rotate3d,
   RotateCcw,
   Ruler,
   Share2,
@@ -41,31 +45,46 @@ import {
   DEFAULT_CONFIG,
   FINISHES,
   SIGNATURES,
-  area,
   distance,
   encodeConfig,
-  environmentName,
   estimate,
   money,
   productName,
-  productHeight,
+  type Config,
   type SignatureId,
   type Unit,
   type View,
 } from './lib/config'
 import { useConfig } from './lib/useConfig'
 import { productFamily } from './lib/products'
-import { defaultQuality, type Backend, type Quality } from './render/quality'
+import { defaultQuality, onBattery, type Backend, type Quality } from './render/quality'
 import {
   cloudUrl,
   requestedTrace,
   usePrerenderProgress,
+  useAngleThumbnails,
   useSpinStatus,
+  useSpinStatusWhen,
   useTraceStatus,
 } from './render/traceStatus'
 import { textureProgress } from './render/progress'
+import { mark } from './render/timeline'
+import {
+  ANGLES,
+  DEFAULT_ANGLE,
+  angleById,
+  exploreEnabled,
+  firstAngle,
+  stepAngle,
+} from './render/angles'
+import { prewarmDesigns, prewarmRange } from './render/prewarm'
 
-const Scene = lazy(() => import('./components/Scene'))
+const Scene = lazy(() =>
+  import('./components/Scene').then((m) => {
+    mark('scene-chunk-loaded')
+    return m
+  }),
+)
 type Dialog = 'share' | 'brief' | 'estimate' | 'library' | 'help' | null
 
 export default function App() {
@@ -82,6 +101,18 @@ export default function App() {
     )
   // An explicit choice (panel or ?quality=) is never overridden by the performance governor.
   const qualityChosen = useRef(new URLSearchParams(window.location.search).has('quality'))
+  // On battery, path tracing on this device is off unless asked for: it runs the GPU flat out.
+  // A cloud renderer does the work elsewhere, so it stays on.
+  useEffect(() => {
+    if (requestedTrace() !== null || cloudUrl() !== null) return
+    let cancelled = false
+    onBattery().then((battery) => {
+      if (!cancelled && battery) setTrace(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [dialog, setDialog] = useState<Dialog>(null),
     [toast, setToast] = useState(initialNotice),
     [reset, setReset] = useState(0)
@@ -89,6 +120,19 @@ export default function App() {
     [photoMode, setPhotoMode] = useState(false),
     [mobilePanel, setMobilePanel] = useState(true)
   const [camera, setCamera] = useState<[number, number, number]>(DEFAULT_CAMERA)
+  // The showroom: a strip of composed camera angles (angles.ts). The 360° View button (or
+  // `?explore=1`) frees the orbit; until then nothing drags.
+  const [explore, setExplore] = useState(() => exploreEnabled())
+  const [angle, setAngle] = useState(DEFAULT_ANGLE)
+  // Picking an angle always returns to the showroom's fixed camera, out of the 360° view.
+  const showAngle = useCallback((id: string) => {
+    const next = angleById(id)
+    setAngle(next.id)
+    setView(next.view)
+    setAutoRotate(false)
+    setExplore(false)
+  }, [])
+  usePrewarm(setConfig, setCamera, setAngle, setView)
   const captureRef = useRef<(() => Promise<string>) | null>(null),
     timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const notify = useCallback((s: string) => {
@@ -143,10 +187,14 @@ export default function App() {
         else undo()
       }
       if (e.key === 'Escape') setPhotoMode(false)
+      if (!explore && view !== 'plan' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault()
+        showAngle(stepAngle(angle, e.key === 'ArrowRight' ? 1 : -1).id)
+      }
     }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
-  }, [dialog, undo, redo])
+  }, [dialog, undo, redo, explore, view, angle, showAngle])
   const signature = (id: SignatureId) => {
     const build = SIGNATURES.find((s) => s.id === id)!
     if (
@@ -158,6 +206,7 @@ export default function App() {
     setConfig(structuredClone(build.config))
     setCamera(build.camera)
     setView('exterior')
+    setAngle(DEFAULT_ANGLE)
     setReset((r) => r + 1)
     notify(`${build.name} applied. Every option stays editable; the build still requires a quote.`)
   }
@@ -185,6 +234,10 @@ export default function App() {
         Skip to configuration
       </a>
       <header className="header">
+        <button className="menu-button" onClick={() => setDialog('help')} aria-label="Menu">
+          <Menu size={18} />
+          <span>Menu</span>
+        </button>
         <a
           className="brand"
           href={window.location.pathname}
@@ -198,24 +251,13 @@ export default function App() {
             <path d="M3 5h24l-4 6H10v4h11l-4 6h-7v6H3z" />
           </svg>
           <span>FURY</span>
-          <span className="brand-divider" />
-          <small>
-            GYM
-            <br />
-            CONFIGURATOR
-          </small>
         </a>
-        <div className="header-center">
-          <span className="live-dot" /> YOUR SPACE. YOUR WAY.
-        </div>
         <nav className="header-actions" aria-label="Build actions">
-          <button onClick={() => setDialog('library')}>
-            <Bookmark size={16} />
-            <span>My builds</span>
+          <button onClick={() => setDialog('library')} aria-label="My builds">
+            <Bookmark size={17} />
           </button>
-          <button onClick={() => setDialog('share')}>
-            <Share2 size={16} />
-            <span>Share</span>
+          <button onClick={() => setDialog('share')} aria-label="Share">
+            <Share2 size={17} />
           </button>
           <button
             className="help-button"
@@ -226,192 +268,229 @@ export default function App() {
           </button>
         </nav>
       </header>
-      <main className="workspace">
-        <section
-          className={`stage ${view === 'plan' ? 'is-plan' : ''}`}
-          aria-label="Gym visualization"
-        >
-          {view === 'plan' ? (
-            <FloorPlan config={config} unit={unit} onChange={setConfig} notify={notify} />
-          ) : (
-            <Suspense
-              fallback={
-                <div className="scene-loading">
-                  <span className="loading-mark">F</span>
-                  <p>Making room for possibility.</p>
-                </div>
-              }
-            >
-              <Scene
-                config={config}
-                view={view}
-                dimensions={dimensions}
-                unit={unit}
-                reset={reset}
-                camera={camera}
-                autoRotate={autoRotate}
-                quality={quality}
-                trace={trace}
-                onCaptureReady={onCaptureReady}
-                onFallback={() => setView('plan')}
-                onBackend={setBackend}
-                onSlow={onSlow}
-              />
-            </Suspense>
-          )}
-          {view !== 'plan' && <SpinLoading />}
-          <div className="stage-heading">
-            <span className="eyebrow">
-              <span className="small-line" />{' '}
-              {config.family === 'studio' ? 'THE S-SERIES COLLECTION' : 'CONTAINER GYMS'}
+      <div className="command-bar">
+        <div className="command-left">
+          <button
+            onClick={() => {
+              setStep(0)
+              setMobilePanel(true)
+            }}
+          >
+            <ArrowLeft size={16} />
+            <span>Change model</span>
+          </button>
+          <button onClick={() => setDialog('library')}>
+            <Bookmark size={16} />
+            <span>Save</span>
+          </button>
+          <button onClick={() => setDialog('share')}>
+            <Share2 size={16} />
+            <span>Create share code</span>
+          </button>
+        </div>
+        <div className="command-right">
+          <button className="price-block" onClick={() => setDialog('estimate')}>
+            <strong>
+              {money(startingPrice)} <small>starting</small>
+            </strong>
+            <span>
+              {productFamily(config.family).shortName} family · selections require a quote{' '}
+              <InfoIcon />
             </span>
-            <h1>
-              {config.family === 'studio' ? 'S' : 'C'}-{config.length}
-              <span>
-                Space to
-                <br />
-                become more.
-              </span>
-            </h1>
-            <div className="studio-meta">
-              {area(config.length * 8, unit)}
-              <i />
-              {finish.name}
-              <i />
-              {distance(productHeight(config), unit)} high
-            </div>
-            {config.studioLayout !== 'single' && (
-              <p className="custom-preview-note">
-                Custom project requested · Single reference unit shown
-              </p>
+          </button>
+          <span className="command-divider" />
+          <button className="summary-button" onClick={() => setDialog('estimate')}>
+            Summary
+          </button>
+          <button className="primary project-button" onClick={() => setDialog('brief')}>
+            Create build brief
+          </button>
+        </div>
+      </div>
+      <main className="workspace">
+        <div className="stage-column">
+          <section
+            className={`stage ${view === 'plan' ? 'is-plan' : ''} ${explore ? 'exploring' : ''}`}
+            aria-label="Gym visualization"
+          >
+            {view === 'plan' ? (
+              <FloorPlan config={config} unit={unit} onChange={setConfig} notify={notify} />
+            ) : (
+              <Suspense
+                fallback={
+                  <div className="scene-loading">
+                    <span className="loading-mark">F</span>
+                    <p>Making room for possibility.</p>
+                  </div>
+                }
+              >
+                <Scene
+                  config={config}
+                  view={view}
+                  dimensions={dimensions}
+                  unit={unit}
+                  reset={reset}
+                  camera={camera}
+                  angle={explore ? null : angle}
+                  explore={explore}
+                  autoRotate={autoRotate}
+                  quality={quality}
+                  trace={trace}
+                  onCaptureReady={onCaptureReady}
+                  onFallback={() => setView('plan')}
+                  onBackend={setBackend}
+                  onSlow={onSlow}
+                />
+              </Suspense>
             )}
-          </div>
-          <div className="view-switch" role="group" aria-label="Camera views">
-            {(['exterior', 'interior', 'plan'] as const).map((v, i) => {
-              const icons = [Expand, Eye, Maximize],
-                Icon = icons[i]
-              return (
+            {view !== 'plan' && <SpinLoading compact />}
+            <div className="view-switch" role="group" aria-label="Camera views">
+              {(['exterior', 'interior', 'plan'] as const).map((v, i) => {
+                const icons = [Expand, Eye, Maximize],
+                  Icon = icons[i]
+                return (
+                  <button
+                    key={v}
+                    aria-pressed={view === v}
+                    className={view === v ? 'active' : ''}
+                    onClick={() => {
+                      if (v !== 'plan' && !explore) showAngle(firstAngle(v).id)
+                      else {
+                        setView(v)
+                        setAutoRotate(false)
+                      }
+                      if (v === 'plan') setStep(2)
+                    }}
+                  >
+                    <Icon size={14} />
+                    <span>{v === 'plan' ? 'Floor plan' : v[0].toUpperCase() + v.slice(1)}</span>
+                  </button>
+                )
+              })}
+            </div>
+            {view !== 'plan' && (
+              <div className="stage-toolbar" aria-label="Scene controls">
+                <button onClick={() => setStep(3)}>
+                  <ChevronUp size={15} />
+                  <span>Adjust scene</span>
+                </button>
                 <button
-                  key={v}
-                  aria-pressed={view === v}
-                  className={view === v ? 'active' : ''}
+                  className={dimensions ? 'active' : ''}
+                  aria-pressed={dimensions}
+                  onClick={() => setDimensions(!dimensions)}
+                >
+                  <Ruler size={15} />
+                  <span>Dimensions</span>
+                </button>
+                <button
+                  className={explore ? 'active' : ''}
+                  aria-pressed={explore}
                   onClick={() => {
-                    setView(v)
+                    const next = !explore
+                    setExplore(next)
                     setAutoRotate(false)
-                    if (v === 'plan') setStep(2)
+                    if (!next) showAngle(view === 'interior' ? firstAngle('interior').id : angle)
                   }}
                 >
-                  <Icon size={14} />
-                  <span>{v === 'plan' ? 'Floor plan' : v[0].toUpperCase() + v.slice(1)}</span>
+                  <Rotate3d size={15} />
+                  <span>360° View</span>
                 </button>
-              )
-            })}
-          </div>
-          <div className="stage-tools" aria-label="Scene controls">
-            <button
-              className={dimensions ? 'active' : ''}
-              aria-label="Show dimensions"
-              aria-pressed={dimensions}
-              onClick={() => setDimensions(!dimensions)}
-              disabled={view === 'plan'}
-            >
-              <Ruler size={18} />
-              <span>Dimensions</span>
-            </button>
-            <button
-              aria-label="Reset camera"
-              onClick={() => setReset((r) => r + 1)}
-              disabled={view === 'plan'}
-            >
-              <RotateCcw size={17} />
-              <span>Reset view</span>
-            </button>
-            <button
-              className={autoRotate ? 'active' : ''}
-              aria-label={autoRotate ? 'Pause rotation' : 'Rotate automatically'}
-              aria-pressed={autoRotate}
-              disabled={view !== 'exterior'}
-              onClick={() => setAutoRotate(!autoRotate)}
-            >
-              {autoRotate ? <Pause size={17} /> : <Play size={17} />}
-              <span>Auto rotate</span>
-            </button>
-            <span className="tool-divider" />
-            <button
-              aria-label="Enter photo mode"
-              onClick={() => {
-                setView('exterior')
-                setPhotoMode(true)
-                setMobilePanel(false)
-              }}
-            >
-              <Camera size={18} />
-              <span>Photo mode</span>
-            </button>
-          </div>
-          {photoMode && (
-            <div className="photo-controls">
-              <span>
-                PHOTO MODE <small>Concept rendering</small>
-              </span>
-              <button onClick={photo}>
-                <ArrowDownToLine size={16} /> Save image
-              </button>
-              <button
-                aria-label="Exit photo mode"
-                onClick={() => {
-                  setPhotoMode(false)
-                  setMobilePanel(true)
-                }}
-              >
-                <X size={18} />
-              </button>
-            </div>
-          )}
-          {view !== 'plan' && <MaterialProgress />}
-          {view !== 'plan' && (
-            <div className="stage-bottom">
-              <div className="scene-status">
-                <span className="status-dot" />
-                <strong>LIVE 3D</strong>
-                {backend && (
-                  <span className="render-backend">
-                    {backend === 'webgpu' ? 'WebGPU' : 'WebGL 2'} · {quality}
-                  </span>
+                {explore && view === 'exterior' && (
+                  <button
+                    className={autoRotate ? 'active' : ''}
+                    aria-label={autoRotate ? 'Pause rotation' : 'Rotate automatically'}
+                    aria-pressed={autoRotate}
+                    onClick={() => setAutoRotate(!autoRotate)}
+                  >
+                    {autoRotate ? <Pause size={15} /> : <Play size={15} />}
+                  </button>
                 )}
-                <TraceBadge />
-                <span>Concept visualization · Not manufacturer CAD</span>
+                <span className="toolbar-divider" />
+                <button aria-label="Save image" onClick={photo}>
+                  <ArrowDownToLine size={15} />
+                </button>
+                <button
+                  aria-label="Enter photo mode"
+                  onClick={() => {
+                    setPhotoMode(true)
+                    setMobilePanel(false)
+                  }}
+                >
+                  <Maximize2 size={15} />
+                </button>
               </div>
-              <div className="scene-hint">
-                {view === 'interior' ? 'Drag to look around' : 'Drag to orbit · Scroll to explore'}
+            )}
+            {photoMode && (
+              <div className="photo-controls">
+                <span>
+                  PHOTO MODE <small>Concept rendering</small>
+                </span>
+                <button onClick={photo}>
+                  <ArrowDownToLine size={16} /> Save image
+                </button>
+                <button
+                  aria-label="Exit photo mode"
+                  onClick={() => {
+                    setPhotoMode(false)
+                    setMobilePanel(true)
+                  }}
+                >
+                  <X size={18} />
+                </button>
               </div>
-              <button className="environment-quick" onClick={() => setStep(3)}>
-                <Leaf size={14} />
-                {environmentName(config.environment)}
-                <ChevronDown size={13} />
+            )}
+            {view !== 'plan' && <MaterialProgress />}
+            <div className="history-controls">
+              <button aria-label="Undo last change" disabled={!canUndo} onClick={undo}>
+                <Undo2 size={16} />
+              </button>
+              <button aria-label="Redo last change" disabled={!canRedo} onClick={redo}>
+                <Redo2 size={16} />
               </button>
             </div>
-          )}
-          <div className="history-controls">
-            <button aria-label="Undo last change" disabled={!canUndo} onClick={undo}>
-              <Undo2 size={16} />
+            <button
+              className="mobile-toggle"
+              onClick={() => setMobilePanel(!mobilePanel)}
+              aria-expanded={mobilePanel}
+              aria-controls="configuration"
+            >
+              <SlidersHorizontal size={16} />
+              {mobilePanel ? 'Hide options' : 'Customize gym'}
+              {mobilePanel ? <Minus size={14} /> : <Plus size={14} />}
             </button>
-            <button aria-label="Redo last change" disabled={!canRedo} onClick={redo}>
-              <Redo2 size={16} />
+          </section>
+          {view !== 'plan' && !photoMode && (
+            <AngleStrip angle={angle} explore={explore} onSelect={showAngle} />
+          )}
+          {view !== 'plan' && !photoMode && (
+            <div className="stage-caption">
+              <span className="status-dot" />
+              <strong>{explore ? 'LIVE 3D' : 'SHOWROOM'}</strong>
+              {backend && (
+                <span className="render-backend">
+                  {backend === 'webgpu' ? 'WebGPU' : 'WebGL 2'} · {quality}
+                </span>
+              )}
+              <TraceBadge />
+              <span className="caption-note">
+                {explore
+                  ? view === 'interior'
+                    ? 'Drag to look around'
+                    : 'Drag to orbit · Scroll to zoom'
+                  : 'Concept visualization · Not manufacturer CAD'}
+              </span>
+            </div>
+          )}
+        </div>
+        <div id="configuration" className="panel-wrapper">
+          <div className="product-title">
+            <h1>
+              {productName(config)} <span className="model-year">{config.length}′</span>
+            </h1>
+            <button className="text-link" onClick={() => setDialog('help')}>
+              Technical data and standard equipment
             </button>
           </div>
-          <button
-            className="mobile-toggle"
-            onClick={() => setMobilePanel(!mobilePanel)}
-            aria-expanded={mobilePanel}
-            aria-controls="configuration"
-          >
-            <SlidersHorizontal size={16} />
-            {mobilePanel ? 'Hide options' : 'Customize gym'}
-            {mobilePanel ? <Minus size={14} /> : <Plus size={14} />}
-          </button>
-        </section>
-        <div id="configuration" className="panel-wrapper">
           <ConfigPanel
             config={config}
             onChange={setConfig}
@@ -424,6 +503,7 @@ export default function App() {
             trace={trace}
             setTrace={setTrace}
             traceSupported={backend === 'webgpu'}
+            explore={explore}
             notify={notify}
             onPlan={() => {
               setView('plan')
@@ -532,9 +612,10 @@ export default function App() {
             </p>
           </div>
           <p className="muted small">
-            Camera: drag / pinch / scroll, or focus the scene and use arrow keys and +/−. Undo:
-            Ctrl/Cmd+Z. Redo: Ctrl/Cmd+Shift+Z. Floor plan: arrow keys move 3 inches; Shift moves 1
-            foot.
+            Camera: pick an angle below the scene, or use the left and right arrow keys. 360° View
+            frees the camera: drag / pinch / scroll, or focus the scene for arrow keys and +/−.
+            Undo: Ctrl/Cmd+Z. Redo: Ctrl/Cmd+Shift+Z. Floor plan: arrow keys move 3 inches; Shift
+            moves 1 foot.
           </p>
           <button
             className="secondary full"
@@ -547,6 +628,7 @@ export default function App() {
                 setConfig(structuredClone(DEFAULT_CONFIG))
                 setCamera(DEFAULT_CAMERA)
                 setView('exterior')
+                setAngle(DEFAULT_ANGLE)
                 setReset((r) => r + 1)
                 close()
                 notify('Your design is reset. Undo is available.')
@@ -561,12 +643,145 @@ export default function App() {
   )
 }
 /**
+ * The angle strip under the stage, as a car configurator's gallery: one tile per composed
+ * angle, with a thumbnail once the angle has been rendered or visited. In 360° view the tiles
+ * still select an angle and leave the free orbit.
+ */
+function AngleStrip({
+  angle,
+  explore,
+  onSelect,
+}: {
+  angle: string
+  explore: boolean
+  onSelect: (id: string) => void
+}) {
+  const thumbnails = useAngleThumbnails()
+  return (
+    <div className="angle-strip" role="tablist" aria-label="Camera angles">
+      {ANGLES.map((a) => {
+        const thumbnail = thumbnails[a.id]
+        const selected = !explore && angle === a.id
+        return (
+          <button
+            key={a.id}
+            role="tab"
+            aria-selected={selected}
+            aria-label={a.label}
+            title={a.label}
+            className={`angle ${selected ? 'active' : ''} ${a.view} ${thumbnail ? 'has-image' : ''}`}
+            onClick={() => onSelect(a.id)}
+          >
+            {thumbnail ? (
+              <img src={thumbnail.url} alt="" draggable={false} />
+            ) : (
+              <span className="angle-placeholder">
+                {a.view === 'interior' ? <Eye size={14} /> : <Expand size={14} />}
+              </span>
+            )}
+            <span className="angle-label">{a.label}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+declare global {
+  interface Window {
+    __furyPrewarm?: {
+      total: number
+      from: number
+      to: number
+      done: number
+      current: string
+      finished: boolean
+      timedOut: string[]
+    }
+  }
+}
+
+/** A design's stills are all at full quality when every angle is final. */
+const PREWARM_DESIGN_TIMEOUT_MS = 180_000
+
+/**
+ * `?prewarm=1` (or `?prewarm=<from>-<to>`): steps through prewarmDesigns, applying each and
+ * waiting until every showroom still of it is rendered at full quality (or a timeout), so the
+ * frame store holds them for visitors. Progress is on window.__furyPrewarm for scripts/prewarm.mjs.
+ */
+function usePrewarm(
+  setConfig: (config: Config) => void,
+  setCamera: (camera: [number, number, number]) => void,
+  setAngle: (angle: string) => void,
+  setView: (view: View) => void,
+) {
+  const designs = useMemo(() => prewarmDesigns(), [])
+  const range = useMemo(() => prewarmRange(designs.length), [designs.length])
+  // Subscribed only while pre-warming, so the whole app never re-renders on frame arrivals.
+  const spin = useSpinStatusWhen(range !== null)
+  const at = useRef(range ? range[0] : 0)
+  const startedAt = useRef(0)
+  const applied = useRef(false)
+  const timedOut = useRef<string[]>([])
+  useEffect(() => {
+    if (!range) return
+    const [from, to] = range
+    const report = (current: string, finished = false) => {
+      window.__furyPrewarm = {
+        total: designs.length,
+        from,
+        to,
+        done: at.current - from,
+        current,
+        finished,
+        timedOut: timedOut.current,
+      }
+    }
+    const apply = () => {
+      if (at.current >= to) {
+        report('', true)
+        console.info(
+          `[prewarm] finished ${to - from} designs (${timedOut.current.length} timed out)`,
+        )
+        return
+      }
+      const design = designs[at.current]
+      setConfig(design.config)
+      setCamera(design.camera)
+      setAngle(DEFAULT_ANGLE)
+      setView('exterior')
+      startedAt.current = performance.now()
+      applied.current = true
+      report(design.label)
+      console.info(`[prewarm] ${at.current + 1}/${to}: ${design.label}`)
+    }
+    if (!applied.current) {
+      apply()
+      return
+    }
+    // The current design is done once every still is final; the spin status counts them.
+    const complete = spin.active && spin.total > 0 && spin.final >= spin.total
+    const late = performance.now() - startedAt.current > PREWARM_DESIGN_TIMEOUT_MS
+    if (complete || late || spin.failed) {
+      if (late && !complete) timedOut.current.push(designs[at.current].label)
+      if (spin.failed) {
+        console.warn('[prewarm] the cloud renderer is unavailable; stopping.')
+        report(designs[at.current].label, true)
+        return
+      }
+      at.current++
+      apply()
+    }
+  }, [range, designs, spin, setConfig, setCamera, setAngle, setView])
+}
+
+/**
  * Covers the scene while the cloud path traces the spin, so the first view seen is the finished
  * one: on opening until the view is ready at full quality and the angles either side of it as
  * previews, and later whenever a view has no path-traced frame yet (the interior's first visit,
  * say). It gives up after a minute and a half.
  */
-function SpinLoading() {
+function SpinLoading({ compact = false }: { compact?: boolean }) {
   const spin = useSpinStatus()
   const [opened, setOpened] = useState(false)
   const done = spin.active && !spin.loading
@@ -575,6 +790,14 @@ function SpinLoading() {
   }, [done])
   const waiting = spin.active && !spin.failed && spin.loading && (!opened || !spin.showing)
   if (!waiting) return null
+  // The showroom never covers the scene: the real-time frame shows while the still renders.
+  if (compact)
+    return (
+      <div className="still-pill" role="status" aria-live="polite">
+        <span className="still-pill-dot" />
+        Rendering photoreal still
+      </div>
+    )
   const progress = spin.panorama ? null : spin.waitReady / Math.max(1, spin.waitTotal)
   return (
     <div className={`spin-loading ${opened ? 'later' : ''}`} role="status" aria-live="polite">

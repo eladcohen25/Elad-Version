@@ -38,6 +38,8 @@ import {
   type RasterMeter,
   type SpinState,
 } from '../render/spin'
+import { ANGLES, coverFit, frameSize, type Vec3 } from '../render/angles'
+import { ShowroomSession, type AngleFrame, type ShowroomState } from '../render/showroom'
 import { INTERIOR_EXPOSURE } from './Atmosphere'
 import { onMaterialsChanged } from '../render/materials'
 import {
@@ -53,7 +55,13 @@ import type { Quality } from '../render/quality'
 import { backendOf } from '../render/renderer'
 import { TraceSession } from '../render/session'
 import { textureProgress } from '../render/progress'
-import { setPrerenderProgress, setSpinStatus, setTraceStatus } from '../render/traceStatus'
+import {
+  setAngleThumbnail,
+  setPrerenderProgress,
+  setSpinStatus,
+  setTraceStatus,
+} from '../render/traceStatus'
+import { mark, markOnce } from '../render/timeline'
 
 /** Median frame time (ms) of a settle run above which a tier is too heavy for this device. */
 const SLOW_FRAME_MS: Record<Quality, number> = { ultra: 50, high: 75, lite: Infinity }
@@ -89,6 +97,7 @@ export function RenderEffects({
   view,
   dimensions,
   spin,
+  showroom,
   onCaptureReady,
   onSlow,
 }: {
@@ -101,6 +110,12 @@ export function RenderEffects({
   dimensions: boolean
   /** Show the cloud's path-traced spin and panorama (spin.ts). */
   spin: boolean
+  /**
+   * The showroom (angles.ts): the angle being looked at and the build's hero direction. With a
+   * cloud renderer its stills replace the raster frame as they arrive (showroom.ts); without one
+   * the angles are simply fixed cameras for the real-time renderer and the local tracer.
+   */
+  showroom: { angle: string; hero: Vec3; cloud: boolean } | null
   onCaptureReady: (capture: Capture) => void
   /** Called once per tier when consecutive frames are consistently slow. */
   onSlow?: () => void
@@ -142,6 +157,32 @@ export function RenderEffects({
     pending.current = null
     capture?.resolvers.forEach((resolve) => resolve(image))
   }
+  // Thumbnails for the angle strip: the design version a thumbnail was taken for, per angle
+  // ("final" stills count as a later version so they replace a preview or a raster snapshot).
+  const thumbDesign = useRef(1)
+  const thumbTaken = useRef(new Map<string, string>())
+  const thumbCanvas = useRef<HTMLCanvasElement | null>(null)
+  const thumbnail = (
+    angle: string,
+    source: CanvasImageSource,
+    w: number,
+    h: number,
+    tag: string,
+  ) => {
+    if (thumbTaken.current.get(angle) === tag) return
+    const canvas = (thumbCanvas.current ??= document.createElement('canvas'))
+    canvas.width = 192
+    canvas.height = Math.max(1, Math.round((192 * h) / w))
+    const context = canvas.getContext('2d')
+    if (!context) return
+    try {
+      context.drawImage(source, 0, 0, canvas.width, canvas.height)
+      thumbTaken.current.set(angle, tag)
+      setAngleThumbnail(angle, { url: canvas.toDataURL('image/jpeg', 0.82), design: tag })
+    } catch {
+      /* A tainted or unavailable source: the tile keeps its placeholder. */
+    }
+  }
 
   useEffect(() => {
     const created = createPipeline(renderer, scene, camera, quality)
@@ -161,9 +202,11 @@ export function RenderEffects({
   // The local tracer loads on demand, and only where WebGPU compute is available. With a cloud
   // renderer, light devices leave all tracing to it.
   const remote = useMemo(() => cloudUrl(), [])
-  // The spin replaces both while it works.
-  const cloudAvailable = trace && remote !== null && !spin
-  const localAvailable = webgpu && trace && !spin && (quality !== 'lite' || !cloudAvailable)
+  // The spin, or the showroom's cloud stills, replace both while they work.
+  const stills = !!showroom?.cloud && remote !== null
+  const cloudAvailable = trace && remote !== null && !spin && !stills
+  const localAvailable =
+    webgpu && trace && !spin && !stills && (quality !== 'lite' || !cloudAvailable)
   useEffect(() => {
     if (!localAvailable && !cloudAvailable) return
     let active = true
@@ -215,11 +258,21 @@ export function RenderEffects({
 
   // The spin: its session, the pass that shows its frames, and a meter for the raster frame's
   // brightness, which the spin's exposure matches once per lighting look.
-  const spinner = useRef<{
-    session: SpinSession
-    present: ReturnType<typeof createSpinPresent>
-    meter: ReturnType<typeof createExposureMeter>
-  } | null>(null)
+  const spinner = useRef<
+    | {
+        kind: 'spin'
+        session: SpinSession
+        present: ReturnType<typeof createSpinPresent>
+        meter: ReturnType<typeof createExposureMeter>
+      }
+    | {
+        kind: 'showroom'
+        session: ShowroomSession
+        present: ReturnType<typeof createSpinPresent>
+        meter: ReturnType<typeof createExposureMeter>
+      }
+    | null
+  >(null)
   /** What the spin shows: a frame, and the one it fades from. */
   const spinShown = useRef<{
     frame: Decoded | null
@@ -234,13 +287,23 @@ export function RenderEffects({
     { camera: CloudCamera | null; resolve: (meter: Promise<RasterMeter>) => void }[]
   >([])
   useEffect(() => {
-    if (!spin || !remote) return
+    if ((!spin && !stills) || !remote) return
     const placeholder = new DataTexture(new Uint16Array(4), 1, 1, RGBAFormat, HalfFloatType)
-    const created = {
-      session: new SpinSession(new CloudClient(remote), invalidate),
-      present: createSpinPresent(renderer),
-      meter: createExposureMeter(renderer, placeholder),
-    }
+    const present = createSpinPresent(renderer)
+    const meter = createExposureMeter(renderer, placeholder)
+    const created = stills
+      ? ({
+          kind: 'showroom',
+          session: new ShowroomSession(new CloudClient(remote), invalidate),
+          present,
+          meter,
+        } as const)
+      : ({
+          kind: 'spin',
+          session: new SpinSession(new CloudClient(remote), invalidate),
+          present,
+          meter,
+        } as const)
     spinner.current = created
     sceneDirty.current = true
     invalidate()
@@ -255,12 +318,13 @@ export function RenderEffects({
       changed.current = true
       invalidate()
     }
-  }, [spin, remote, renderer, invalidate])
+  }, [spin, stills, remote, renderer, invalidate])
 
   // Any edit to the design hands the frame back to the rasterizer and re-captures before tracing.
   useEffect(() => {
     changed.current = true
     sceneDirty.current = true
+    thumbDesign.current++
     invalidate()
   }, [config, view, dimensions, invalidate])
 
@@ -356,51 +420,87 @@ export function RenderEffects({
       }
       const looking = view === 'interior' ? 'interior' : 'exterior'
       const textures = textureProgress.get()
-      const state: SpinState = {
-        active: looking,
-        exterior:
-          spinView.spec && spinView.pose
-            ? {
-                spec: spinView.spec,
-                pose: spinView.pose,
-                width: size.x,
-                height: size.y,
-                lens: { fov: EXTERIOR_FOV, near: cam.near, far: cam.far },
-              }
-            : null,
-        interior: {
-          eye: new Vector3(...inside.position),
-          width: Math.min(8192, Math.max(2048, panoramaWidth)),
-          lens: { fov: inside.fov, near: cam.near, far: cam.far },
-          view: {
-            matrix: meterMatrix
-              .lookAt(
-                meterEye.set(...inside.position),
-                meterTarget.set(...inside.target),
-                camera.up,
-              )
-              .setPosition(meterEye)
-              .toArray(),
-            fov: inside.fov,
-            near: cam.near,
-            far: cam.far,
+      const rasterKey = (at: CloudCamera | null) =>
+        new Promise<RasterMeter>((resolve) => {
+          meterWanted.current.push({ camera: at, resolve })
+          invalidate()
+        })
+      // Scanned materials still streaming in: the stills wait for them (each arrival redraws).
+      const settled = textures.loaded >= textures.requested
+      if (spinning.kind === 'showroom') {
+        // Every angle's camera, as CameraRig frames it, at the still size for this screen.
+        const still = frameSize(size.x, size.y)
+        const frames: AngleFrame[] = ANGLES.map((angle) => {
+          const framing = cameraFraming(
+            config,
+            angle.view,
+            angle.direction ?? showroom!.hero,
+            still.aspect,
+            { eye: angle.eye, zoom: angle.zoom },
+          )
+          return {
+            id: angle.id,
+            view: angle.view,
+            camera: {
+              matrix: meterMatrix
+                .lookAt(
+                  meterEye.set(...framing.position),
+                  meterTarget.set(...framing.target),
+                  camera.up,
+                )
+                .setPosition(meterEye)
+                .toArray(),
+              fov: framing.fov,
+              near: cam.near,
+              far: cam.far,
+            },
+            width: still.width,
+            height: still.height,
+            finalWidth: still.finalWidth,
+            finalHeight: still.finalHeight,
+          }
+        })
+        const state: ShowroomState = {
+          angle: showroom!.angle,
+          frames,
+          exposure: { exterior: outside, interior: outside * INTERIOR_EXPOSURE },
+        }
+        spinning.session.sync(scene, lookRef.current, sceneKey.current, state, rasterKey, settled)
+      } else {
+        const state: SpinState = {
+          active: looking,
+          exterior:
+            spinView.spec && spinView.pose
+              ? {
+                  spec: spinView.spec,
+                  pose: spinView.pose,
+                  width: size.x,
+                  height: size.y,
+                  lens: { fov: EXTERIOR_FOV, near: cam.near, far: cam.far },
+                }
+              : null,
+          interior: {
+            eye: new Vector3(...inside.position),
+            width: Math.min(8192, Math.max(2048, panoramaWidth)),
+            lens: { fov: inside.fov, near: cam.near, far: cam.far },
+            view: {
+              matrix: meterMatrix
+                .lookAt(
+                  meterEye.set(...inside.position),
+                  meterTarget.set(...inside.target),
+                  camera.up,
+                )
+                .setPosition(meterEye)
+                .toArray(),
+              fov: inside.fov,
+              near: cam.near,
+              far: cam.far,
+            },
           },
-        },
-        exposure: { exterior: outside, interior: outside * INTERIOR_EXPOSURE },
+          exposure: { exterior: outside, interior: outside * INTERIOR_EXPOSURE },
+        }
+        spinning.session.sync(scene, lookRef.current, sceneKey.current, state, rasterKey, settled)
       }
-      spinning.session.sync(
-        scene,
-        lookRef.current,
-        sceneKey.current,
-        state,
-        (at) =>
-          new Promise<RasterMeter>((resolve) => {
-            meterWanted.current.push({ camera: at, resolve })
-            invalidate()
-          }),
-        // Scanned materials still streaming in: the spin waits for them (each arrival is redrawn).
-        textures.loaded >= textures.requested,
-      )
       if (meterWanted.current.length) {
         // The raster frame for this look at each camera asked for (the interior's while the
         // visitor is outside: only the camera and exposure differ between views), rendered a few
@@ -434,6 +534,13 @@ export function RenderEffects({
       const frame = spinning.session.texture()
       const shown = spinShown.current
       if (frame && frame !== shown.frame) {
+        if (spinning.session.isFocus(frame))
+          markOnce(`spin-focus-${frame.final ? 'final' : 'preview'}-shown`, {
+            key: frame.key,
+            final: frame.final,
+            view: looking,
+          })
+        else markOnce('spin-nearest-frame-shown', { key: frame.key, view: looking })
         // A better image of the same frame, or the first one after a design change, fades in;
         // stepping to the next frame of the spin cuts to it.
         const fades =
@@ -451,22 +558,38 @@ export function RenderEffects({
       // Until the next frame is decoded the last one stays, in the same view only.
       if (current.frame && current.mode === looking) {
         const t = current.from ? Math.min(1, (now - current.start) / 300) : 1
+        const image = current.frame.texture.image as { width?: number; height?: number }
         spinning.present.render({
           from: t < 1 ? current.from : null,
           to: current.frame.texture,
           t,
           panorama:
-            looking === 'interior'
+            spinning.kind === 'spin' && looking === 'interior'
               ? {
                   rotation: spinRotation.setFromMatrix4(camera.matrixWorld),
                   tanHalfFov: Math.tan((cam.fov * Math.PI) / 360),
                   aspect: cam.aspect,
                 }
               : null,
+          fit:
+            spinning.kind === 'showroom' && image.width && image.height
+              ? coverFit(image.width / image.height, size.x / size.y)
+              : undefined,
         })
         spinning.session.hold(
           t < 1 && current.from ? [current.frame.texture, current.from] : [current.frame.texture],
         )
+        if (spinning.kind === 'showroom' && showroom && spinning.session.isFocus(current.frame)) {
+          const image = current.frame.texture.image as ImageBitmap
+          if (image?.width)
+            thumbnail(
+              showroom.angle,
+              image,
+              image.width,
+              image.height,
+              `${current.frame.design}|${current.frame.final ? 'final' : 'preview'}`,
+            )
+        }
         if (t < 1) invalidate()
         const capture = pending.current
         // The full-quality frame of the view itself, not the nearest one standing in for it.
@@ -477,7 +600,7 @@ export function RenderEffects({
         setSpinStatus({
           active: true,
           ...spinning.session.progress,
-          panorama: looking === 'interior',
+          panorama: spinning.kind === 'spin' && looking === 'interior',
           showing: true,
         })
         return
@@ -485,7 +608,7 @@ export function RenderEffects({
       setSpinStatus({
         active: true,
         ...spinning.session.progress,
-        panorama: looking === 'interior',
+        panorama: spinning.kind === 'spin' && looking === 'interior',
         showing: false,
       })
       // Nothing path traced to show yet: the raster frame, which the exposure meter also reads.
@@ -515,7 +638,10 @@ export function RenderEffects({
       const refining = tracer.step()
       const traced = tracer.view(now)
       // Until the first traced image is ready the canvas keeps the last raster frame.
-      if (traced.from || traced.t > 0) present.current!.render(traced)
+      if (traced.from || traced.t > 0) {
+        markOnce('first-traced-image', { source: tracer.source, samples: tracer.samples, view })
+        present.current!.render(traced)
+      }
       const capture = pending.current
       if (capture && (tracer.ready(EXPORT_SAMPLES) || now > capture.deadline))
         deliver(renderer.domElement.toDataURL('image/png'))
@@ -534,6 +660,7 @@ export function RenderEffects({
           ? { target: controls.target.clone() }
           : null
       tracer.begin(scene, camera, lookRef.current, active.hdr, REST_SAMPLES, orbit)
+      mark('trace-begin', { source: tracer.source, view })
       report(true)
       invalidate()
       return
@@ -543,9 +670,15 @@ export function RenderEffects({
     const chained = settle.current > 0
     if (settle.current <= 0) settle.current = active.settleFrames
     active.render()
+    markOnce('first-raster-frame', { quality, view })
     fresh.current = true
     settle.current--
     still.current++
+    // A settled real-time frame of a posed angle stands in for its thumbnail until a still does.
+    if (showroom && !stills && settle.current <= 0) {
+      const el = renderer.domElement
+      thumbnail(showroom.angle, el, el.width, el.height, `raster-${thumbDesign.current}`)
+    }
     if (settle.current > 0) invalidate()
     if (tracer) {
       if (!restTimer.current && (settle.current <= 0 || still.current >= TRACE_AFTER_FRAMES))

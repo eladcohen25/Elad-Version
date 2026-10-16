@@ -19,7 +19,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
-from .api import Bucket
+from .api import FRAME_KEY, Bucket, frame_digest
+from .frames import RemoteFrames, remote_frames_from_env
 from .protocol import HASH, MAX_BLOB_BYTES, ProtocolError, decompress, digest, validate_request
 
 MAX_SCENE_BYTES = 32 << 20
@@ -73,9 +74,15 @@ def create_gateway(
     dispatch: Callable[[str, str, bytes, str, str], Awaitable[tuple[int, dict, bytes]]],
     origins: str | None = None,
     max_sessions: int | None = None,
+    frames: RemoteFrames | None | bool = True,
 ) -> FastAPI:
-    """`dispatch(method, path, body, client, session)` calls the session's own GPU."""
+    """`dispatch(method, path, body, client, session)` calls the session's own GPU.
+
+    `frames` is the durable frame store a finished showroom still is answered from without a
+    GPU (frames.py); True reads it from the environment, None disables it.
+    """
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    remote = remote_frames_from_env() if frames is True else (frames or None)
     app.add_middleware(
         CORSMiddleware,
         allow_origin_regex=origins or os.environ["FURY_ALLOWED_ORIGINS"],
@@ -94,6 +101,11 @@ def create_gateway(
             "x-prepare-ms",
             "x-render-ms",
             "x-pack-ms",
+            "x-cold",
+            "x-boot-ms",
+            "x-container-age-ms",
+            "x-dispatch-ms",
+            "x-cache-store",
         ],
     )
     # Global, not per caller: one gateway container is required. A visitor's spin is a few hundred
@@ -112,8 +124,32 @@ def create_gateway(
         return response
 
     @app.get("/health")
-    async def health():
-        return {"ok": True, "service": "gateway"}
+    async def health(request: Request):
+        """The gateway's own state, never starting a GPU. With `?session=<id>` for a session
+        that already holds a GPU, its renderer's state too (device, denoiser, queue, boot time)."""
+        now = time.monotonic()
+        report: dict = {
+            "ok": True,
+            "service": "gateway",
+            "sessions": {
+                "limit": sessions.limit,
+                "active": len(sessions.seen),
+                "idleSeconds": sessions.idle,
+                "ages": {key: round(now - last, 1) for key, last in sorted(sessions.seen.items())},
+            },
+        }
+        session = request.query_params.get("session")
+        if session and SESSION.fullmatch(session) and session in sessions.seen:
+            started = time.perf_counter()
+            try:
+                status, _headers, content = await asyncio.wait_for(
+                    dispatch("GET", "/health", b"", "gateway", session), timeout=30
+                )
+                report["renderer"] = json.loads(content) if status == 200 else {"status": status}
+            except Exception as error:  # noqa: BLE001 - reported, not raised
+                report["renderer"] = {"error": repr(error)}
+            report["rendererMs"] = round((time.perf_counter() - started) * 1000)
+        return report
 
     async def forward(request: Request, path: str, limit: int):
         client = request.client.host if request.client else "unknown"
@@ -142,6 +178,26 @@ def create_gateway(
                 quality["timeLimit"] = min(cap, float(quality.get("timeLimit", 15)))
                 data["quality"] = quality
                 body = json.dumps(data).encode()
+                # A finished frame rendered before, for anyone: answered here, no GPU woken.
+                if remote is not None and data.get("output") == "frame":
+                    normalized = validate_request(data)
+                    key = frame_digest(normalized)
+                    stored = await asyncio.to_thread(remote.get, key)
+                    if stored is not None and len(stored) > FRAME_KEY.size:
+                        (key_light,) = FRAME_KEY.unpack_from(stored)
+                        return Response(
+                            stored[FRAME_KEY.size :],
+                            media_type="image/webp",
+                            headers={
+                                "X-Cache": "hit",
+                                "X-Cache-Store": "gateway",
+                                "X-Traced-Key": f"{key_light:.4f}",
+                                "X-Image-Format": "webp",
+                                "X-Image-Width": str(normalized["width"]),
+                                "X-Image-Height": str(normalized["height"]),
+                                "X-Dispatch-Ms": "0",
+                            },
+                        )
             else:
                 if digest(body) != path.rsplit("/", 1)[1]:
                     raise ValueError
@@ -152,16 +208,26 @@ def create_gateway(
         # Only a valid request takes a place, so malformed ones cannot keep visitors off the GPUs.
         if not sessions.admit(session):
             return full
+        dispatched = time.perf_counter()
         try:
             status, headers, content = await asyncio.wait_for(
                 dispatch(request.method, path, body, client, session), timeout=180
             )
         except Exception:
-            logging.getLogger(__name__).exception("Private GPU dispatch failed")
+            logging.getLogger(__name__).exception(
+                "Private GPU dispatch failed after %d ms",
+                round((time.perf_counter() - dispatched) * 1000),
+            )
             raise HTTPException(503, "Cloud renderer unavailable; try again shortly") from None
         finally:
             # A long render keeps its session's place.
             sessions.touch(session)
+        # Wall time at the gateway: the renderer's own queue and render times are in its headers,
+        # so the difference is Modal scheduling and a cold container starting.
+        headers = {
+            **headers,
+            "X-Dispatch-Ms": str(round((time.perf_counter() - dispatched) * 1000)),
+        }
         return Response(content, status_code=status, headers=headers)
 
     @app.post("/render")

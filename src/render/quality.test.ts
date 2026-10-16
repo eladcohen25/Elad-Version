@@ -3,16 +3,16 @@ import { QUALITY_DETAILS, defaultQuality, requestedBackend } from './quality'
 import { textureProgress } from './progress'
 
 describe('render quality selection', () => {
-  it('starts laptops on Ultra, tablets on High, and phones on Lite', () => {
-    expect(defaultQuality(1440, '')).toBe('ultra')
-    expect(defaultQuality(1100, '')).toBe('ultra')
+  it('starts laptops and tablets on High (Ultra is opt-in) and phones on Lite', () => {
+    expect(defaultQuality(1440, '')).toBe('high')
+    expect(defaultQuality(1100, '')).toBe('high')
     expect(defaultQuality(900, '')).toBe('high')
     expect(defaultQuality(390, '')).toBe('lite')
   })
   it('honours an explicit ?quality= tier and ignores unknown values', () => {
     expect(defaultQuality(390, '?quality=ultra')).toBe('ultra')
     expect(defaultQuality(1440, '?quality=lite')).toBe('lite')
-    expect(defaultQuality(1440, '?quality=cinematic')).toBe('ultra')
+    expect(defaultQuality(1440, '?quality=cinematic')).toBe('high')
   })
   it('lets ?renderer= force a GPU backend', () => {
     expect(requestedBackend('?renderer=webgl')).toBe('webgl2')

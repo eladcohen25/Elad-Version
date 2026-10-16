@@ -2,3 +2,4 @@ bpy==4.5.0
 fastapi[standard]==0.143.2
 numpy==1.26.4
 pillow==11.3.0
+boto3==1.40.49

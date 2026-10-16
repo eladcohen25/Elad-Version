@@ -131,6 +131,13 @@ export function useSpinStatus() {
   return useSyncExternalStore(subscribeSpin, spinStatus, spinStatus)
 }
 
+const never = () => () => {}
+
+/** The spin status, re-rendering the caller only while `active` (the pre-warm, say). */
+export function useSpinStatusWhen(active: boolean) {
+  return useSyncExternalStore(active ? subscribeSpin : never, spinStatus, spinStatus)
+}
+
 const spinFailed = () => spin.failed
 
 /** Whether the spin failed; unlike useSpinStatus, progress does not re-render the caller. */
@@ -155,4 +162,35 @@ export function cloudUrl(search = window.location.search): string | null {
     return param.replace(/\/$/, '')
   const configured = import.meta.env.VITE_CLOUD_RENDER_URL as string | undefined
   return configured ? configured.replace(/\/$/, '') : null
+}
+
+/**
+ * Thumbnails for the showroom's angle strip: a small image per angle, from the cloud still when
+ * one is shown or a snapshot of the real-time frame when the angle is visited. Each is tagged
+ * with the design it shows, so a stale one is replaced rather than cleared.
+ */
+export type AngleThumbnail = { url: string; design: string }
+let thumbnails: Record<string, AngleThumbnail> = {}
+const thumbnailListeners = new Set<() => void>()
+
+export function setAngleThumbnail(angle: string, thumbnail: AngleThumbnail) {
+  const current = thumbnails[angle]
+  if (current?.url === thumbnail.url && current.design === thumbnail.design) return
+  thumbnails = { ...thumbnails, [angle]: thumbnail }
+  thumbnailListeners.forEach((listener) => listener())
+}
+
+export function angleThumbnails() {
+  return thumbnails
+}
+
+function subscribeThumbnails(listener: () => void) {
+  thumbnailListeners.add(listener)
+  return () => {
+    thumbnailListeners.delete(listener)
+  }
+}
+
+export function useAngleThumbnails() {
+  return useSyncExternalStore(subscribeThumbnails, angleThumbnails, angleThumbnails)
 }

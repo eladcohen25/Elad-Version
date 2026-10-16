@@ -22,6 +22,25 @@ MAX_SESSIONS = os.environ.get("FURY_MAX_SESSIONS", "3")
 
 cache = modal.Volume.from_name("fury-render-cache", create_if_missing=True)
 
+# The durable frame store (fury_render/frames.py): an S3-compatible bucket where every finished
+# showroom still is kept and from which the gateway answers a repeat without waking a GPU. Read at
+# deploy time from FURY_FRAME_BUCKET, FURY_FRAME_ENDPOINT, FURY_FRAME_PREFIX, FURY_FRAME_REGION and
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY; with no bucket, frames live on the volume only.
+FRAME_STORE = modal.Secret.from_dict(
+    {
+        name: os.environ[name]
+        for name in (
+            "FURY_FRAME_BUCKET",
+            "FURY_FRAME_ENDPOINT",
+            "FURY_FRAME_PREFIX",
+            "FURY_FRAME_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+        )
+        if os.environ.get(name)
+    }
+)
+
 environment = {
     "FURY_DEVICE": "auto",
     # One renderer per GPU, each rendering its own frames.
@@ -52,7 +71,13 @@ image = (
         "libgomp1",
     )
     # Keep in step with requirements.txt.
-    .uv_pip_install("bpy==4.5.0", "fastapi[standard]==0.143.2", "numpy==1.26.4", "pillow==11.3.0")
+    .uv_pip_install(
+        "bpy==4.5.0",
+        "fastapi[standard]==0.143.2",
+        "numpy==1.26.4",
+        "pillow==11.3.0",
+        "boto3==1.40.49",
+    )
     .add_local_python_source("fury_render")
 )
 
@@ -72,7 +97,10 @@ app = modal.App(os.environ.get("FURY_APP_NAME", "fury-render"))
     max_containers=1,
     timeout=900,
     # FURY_DENOISE=cpu at deploy time skips GPU denoising (it falls back by itself if it fails).
-    secrets=[modal.Secret.from_dict({"FURY_DENOISE": os.environ.get("FURY_DENOISE", "auto")})],
+    secrets=[
+        modal.Secret.from_dict({"FURY_DENOISE": os.environ.get("FURY_DENOISE", "auto")}),
+        FRAME_STORE,
+    ],
 )
 # Frame requests wait in the renderer's own priority queue.
 @modal.concurrent(max_inputs=64)
@@ -82,14 +110,26 @@ class Renderer:
 
     @modal.enter()
     def start(self):
+        # Boot phases are timed and printed, so `modal app logs` shows what a cold start costs:
+        # importing Blender, configuring the device and compiling kernels, the warm-up render.
+        import time
+
+        t0 = time.perf_counter()
+        phase = lambda name: print(
+            f"boot[{self.session}]: {name} at {round((time.perf_counter() - t0) * 1000)} ms"
+        )  # noqa: E731
+        phase("container entered")
         # Set cache paths after volume mounting, not while the image is being built.
         os.environ.update(environment)
         from fury_render.api import create_app
 
+        phase("api imported")
         self.web_app = create_app(start=False)
+        phase("app created; starting workers (bpy import, device, warm-up)")
         info = self.web_app.state.service.start()
-        print("renderer ready:", info)
+        phase(f"renderer ready: {info}")
         cache.commit()
+        phase("volume committed")
 
     @modal.method()
     async def request(self, method: str, path: str, body: bytes, client: str):
@@ -101,7 +141,7 @@ class Renderer:
 
 gateway_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .uv_pip_install("fastapi[standard]==0.143.2", "numpy==1.26.4")
+    .uv_pip_install("fastapi[standard]==0.143.2", "numpy==1.26.4", "boto3==1.40.49")
     .add_local_python_source("fury_render")
 )
 
@@ -120,6 +160,7 @@ gateway_image = (
                 "FURY_MAX_SESSIONS": MAX_SESSIONS,
             }
         ),
+        FRAME_STORE,
     ],
 )
 # Visitors keep several frame requests open while their spin renders.

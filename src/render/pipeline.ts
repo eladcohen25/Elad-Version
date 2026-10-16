@@ -316,6 +316,11 @@ export type SpinView = {
   t: number
   /** For a panorama: the camera's rotation and lens, to look up each pixel's direction. */
   panorama: { rotation: Matrix3; tanHalfFov: number; aspect: number } | null
+  /**
+   * For a still rendered at another aspect ratio (angles.ts frameSize): the UV scale and offset
+   * that crop it to cover the screen without stretching. Omitted: the frame fills the screen.
+   */
+  fit?: { scaleX: number; scaleY: number; offsetX: number; offsetY: number }
 }
 
 /**
@@ -333,6 +338,8 @@ export function createSpinPresent(renderer: WebGPURenderer) {
   const rotation = uniform(new Matrix3())
   const tanHalf = uniform(1)
   const aspect = uniform(1)
+  const fitScale = uniform(new Vector2(1, 1))
+  const fitOffset = uniform(new Vector2(0, 0))
   // Screen rows run top down, as frames do (screenUV's origin is the top left).
   const ndc = screenUV.mul(2).sub(1)
   const ray = vec3(ndc.x.mul(tanHalf).mul(aspect), ndc.y.mul(tanHalf).negate(), float(-1))
@@ -344,7 +351,7 @@ export function createSpinPresent(renderer: WebGPURenderer) {
       .add(0.5),
     acos(direction.y.clamp(-1, 1)).div(Math.PI),
   )
-  const lookup = mix(screenUV, panoramaUV, isPanorama)
+  const lookup = mix(screenUV.mul(fitScale).add(fitOffset), panoramaUV, isPanorama)
   const to = texture(blank, lookup)
   const from = texture(blank, lookup)
   const color = mix(from.rgb, to.rgb, t)
@@ -360,6 +367,8 @@ export function createSpinPresent(renderer: WebGPURenderer) {
       from.value = view.from ?? view.to
       t.value = view.from ? view.t : 1
       isPanorama.value = view.panorama ? 1 : 0
+      fitScale.value.set(view.fit?.scaleX ?? 1, view.fit?.scaleY ?? 1)
+      fitOffset.value.set(view.fit?.offsetX ?? 0, view.fit?.offsetY ?? 0)
       if (view.panorama) {
         rotation.value.copy(view.panorama.rotation)
         tanHalf.value = view.panorama.tanHalfFov

@@ -25,6 +25,7 @@ import {
   type GridPose,
 } from '../render/orbit'
 import { cloudUrl, spinEnabled, useSpinFailed } from '../render/traceStatus'
+import { angleById } from '../render/angles'
 import {
   SPIN_LEVELS,
   SPIN_STEPS,
@@ -102,6 +103,7 @@ function CameraRig({
   autoRotate,
   snap,
   spin,
+  angle,
 }: {
   config: Config
   view: View
@@ -115,10 +117,19 @@ function CameraRig({
    * move a stand-in camera smoothly; the real one jumps to the nearest frame's pose.
    */
   spin: boolean
+  /**
+   * The showroom (angles.ts): the camera eases to a fixed, composed angle and stays there; no
+   * orbit, no look-around. Null in explore mode, where the controls above apply.
+   */
+  angle: string | null
 }) {
   const { camera, size, gl, invalidate } = useThree()
   const controls = useRef<OrbitControlsImpl>(null)
   const spinning = spin && view === 'exterior'
+  const posed = angle !== null
+  const posedRef = useRef(posed)
+  posedRef.current = posed
+  const angleSpec = angle ? angleById(angle) : null
   const spinRef = useRef(spinning)
   spinRef.current = spinning
   const proxy = useMemo(() => new PerspectiveCamera(), [])
@@ -147,13 +158,18 @@ function CameraRig({
   ])
   const framingConfig = useRef(c)
   framingConfig.current = c
+  const angleDirection = angleSpec?.direction
+  const [ax, ay, az] = angleDirection ?? [dx, dy, dz]
+  const angleEye = angleSpec?.eye ?? 'entry'
+  const angleZoom = angleSpec?.zoom ?? 1
   useEffect(() => {
     const p = camera as PerspectiveCamera
     const framing = cameraFraming(
       framingConfig.current,
       view,
-      [dx, dy, dz],
+      [ax, ay, az],
       size.width / size.height,
+      { eye: angleEye, zoom: angleZoom },
     )
     p.fov = framing.fov
     p.updateProjectionMatrix()
@@ -192,9 +208,12 @@ function CameraRig({
     framingKey,
     view,
     reset,
-    dx,
-    dy,
-    dz,
+    ax,
+    ay,
+    az,
+    angleEye,
+    angleZoom,
+    posed,
     invalidate,
     spinning,
     proxy,
@@ -211,7 +230,7 @@ function CameraRig({
       lastY = e.clientY
     }
     const move = (e: PointerEvent) => {
-      if (!drag || view !== 'interior') return
+      if (!drag || view !== 'interior' || posedRef.current) return
       yaw.current -= (e.clientX - lastX) * 0.005
       pitch.current = Math.max(-0.7, Math.min(0.7, pitch.current - (e.clientY - lastY) * 0.005))
       lastX = e.clientX
@@ -225,6 +244,8 @@ function CameraRig({
     const key = (e: KeyboardEvent) => {
       if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '+', '-', '='].includes(e.key))
         return
+      // In the showroom the arrow keys step through the angle strip (App handles them).
+      if (posedRef.current) return
       e.preventDefault()
       moving.current = false
       snapping.current = null
@@ -273,7 +294,9 @@ function CameraRig({
     el.tabIndex = 0
     el.setAttribute(
       'aria-label',
-      'Interactive gym. Arrow keys rotate; plus and minus zoom. Interior view: arrows look around.',
+      posedRef.current
+        ? 'Gym visualization. Left and right arrow keys step through the camera angles.'
+        : 'Interactive gym. Arrow keys rotate; plus and minus zoom. Interior view: arrows look around.',
     )
     el.addEventListener('pointerdown', down)
     el.addEventListener('pointermove', move)
@@ -304,7 +327,7 @@ function CameraRig({
     invalidate()
   })
   useFrame(() => {
-    if (spinRef.current) return
+    if (spinRef.current || posedRef.current) return
     const orbit = controls.current
     const last = glide.current
     const pixels = motionPixels(
@@ -362,7 +385,8 @@ function CameraRig({
       ? 1
       : 1 - Math.exp(-delta * 5)
     camera.position.lerp(targetPosition.current, t)
-    const orbit = controls.current && view !== 'interior' ? controls.current : null
+    const orbit =
+      controls.current && view !== 'interior' && !posedRef.current ? controls.current : null
     if (orbit) orbit.target.lerp(targetLook.current, t)
     if (
       camera.position.distanceTo(targetPosition.current) < 0.015 &&
@@ -375,6 +399,9 @@ function CameraRig({
     }
     if (orbit) orbit.update()
     else camera.lookAt(targetLook.current)
+    // The posed exterior camera keeps the controls' target in step, so turning explore on
+    // later (or a probe reading it) starts from the right place.
+    if (posedRef.current && controls.current) controls.current.target.copy(targetLook.current)
     invalidate()
   })
   return (
@@ -383,10 +410,10 @@ function CameraRig({
       // In the spin the controls move a stand-in; the camera follows it frame by frame.
       camera={spinning ? proxy : undefined}
       makeDefault
-      enabled={view !== 'interior'}
+      enabled={view !== 'interior' && !posed}
       enablePan={false}
       {...ORBIT_LIMITS}
-      autoRotate={autoRotate && view === 'exterior'}
+      autoRotate={autoRotate && view === 'exterior' && !posed}
       autoRotateSpeed={0.45}
       dampingFactor={DAMPING}
       onStart={() => {
@@ -408,6 +435,8 @@ export default function Scene({
   unit,
   reset,
   camera = [0.48, 0.24, 0.84],
+  angle,
+  explore,
   autoRotate,
   quality,
   trace,
@@ -422,6 +451,10 @@ export default function Scene({
   unit: Unit
   reset: number
   camera?: [number, number, number]
+  /** The showroom angle being looked at (angles.ts); null in explore mode. */
+  angle: string | null
+  /** 360° view: the free orbit (and, with a cloud, the spin) instead of the fixed angles. */
+  explore: boolean
   autoRotate: boolean
   quality: Quality
   /** Refine resting views with the path tracer where WebGPU allows. */
@@ -439,8 +472,12 @@ export default function Scene({
   // `?spin=0` keeps the earlier way, with resting views pre-rendered around the orbit grid.
   const cloud = useMemo(() => trace && cloudUrl() !== null, [trace])
   const spinFailed = useSpinFailed()
-  const spin = cloud && spinEnabled() && !spinFailed
-  const snap = cloud && !spinEnabled()
+  // The showroom (angles.ts) is the default: fixed angles, with the cloud's stills when it is
+  // configured. Explore mode brings back the orbit, and with a cloud the spin (or `?spin=0`).
+  const spin = explore && cloud && spinEnabled() && !spinFailed
+  const snap = explore && cloud && !spinEnabled()
+  const showroom =
+    !explore && angle !== null ? { angle, hero: camera, cloud: cloud && !spinFailed } : null
   return (
     <GraphicsBoundary onFallback={onFallback}>
       <Canvas
@@ -468,6 +505,7 @@ export default function Scene({
           autoRotate={autoRotate}
           snap={snap}
           spin={spin}
+          angle={showroom ? angle : null}
         />
         <InteriorProbe config={config} quality={quality} />
         <SiteProbe config={config} quality={quality} />
@@ -479,6 +517,7 @@ export default function Scene({
           view={view}
           dimensions={dimensions}
           spin={spin}
+          showroom={showroom}
           onCaptureReady={onCaptureReady}
           onSlow={onSlow}
         />

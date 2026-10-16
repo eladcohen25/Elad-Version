@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse, Response
 
 from . import finishing
 from . import worker as worker_module
+from .frames import FrameCache, remote_frames_from_env
 from .protocol import (
     HASH,
     IMAGE_FORMAT,
@@ -346,11 +347,18 @@ def client_key(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+# Responses after boot that carry X-Cold: 1 (the first frames of a cold start).
+COLD_RESPONSES = 3
+
+
 class Service:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
         self.store = BlobStore(self.settings.blob_dir, self.settings.blob_budget)
-        self.frames = BlobStore(self.settings.frame_dir, self.settings.frame_budget)
+        # Finished frames: the volume in front of the durable bucket, when one is configured.
+        self.frames = FrameCache(
+            BlobStore(self.settings.frame_dir, self.settings.frame_budget), remote_frames_from_env()
+        )
         self.finisher = ThreadPoolExecutor(self.settings.finish_threads)
         count = max(1, self.settings.workers)
         self.workers = [Worker(self.settings, i if count > 1 else None) for i in range(count)]
@@ -363,12 +371,33 @@ class Service:
         )
         upload_rate = self.settings.upload_mb_per_hour * (1 << 20) / 3600
         self.uploads = Bucket(upload_rate, MAX_BLOB_BYTES * 4)
+        # Cold-start accounting, reported on every response (X-Boot-Ms, X-Container-Age-Ms) and
+        # as X-Cold on the first responses after boot, so the browser's timeline can tell a cold
+        # GPU from a slow one.
+        self.boot_started = time.perf_counter()
+        self.boot_ready: float | None = None
+        self.responses = 0
 
     def start(self) -> dict:
         # Side by side: each warms up its own GPU.
         with ThreadPoolExecutor(len(self.workers)) as pool:
             infos = list(pool.map(lambda worker: worker.start(), self.workers))
+        self.boot_ready = time.perf_counter()
+        print(f"boot: {round((self.boot_ready - self.boot_started) * 1000)} ms to ready")
         return infos[0]
+
+    def timing_headers(self) -> dict[str, str]:
+        """Cold-start headers for a response: how long boot took, how old the container is."""
+        self.responses += 1
+        headers = {}
+        if self.boot_ready is not None:
+            headers["X-Boot-Ms"] = str(round((self.boot_ready - self.boot_started) * 1000))
+            headers["X-Container-Age-Ms"] = str(
+                round((time.perf_counter() - self.boot_ready) * 1000)
+            )
+        if self.responses <= COLD_RESPONSES:
+            headers["X-Cold"] = "1"
+        return headers
 
     @property
     def info(self) -> dict:
@@ -536,9 +565,20 @@ def create_app(settings: Settings | None = None, start: bool = True) -> FastAPI:
             "x-cache",
             "x-finish-ms",
             "x-traced-key",
+            "x-cold",
+            "x-boot-ms",
+            "x-container-age-ms",
+            "x-cache-store",
         ],
         max_age=3600,
     )
+
+    @app.middleware("http")
+    async def cold_start_headers(request: Request, call_next):
+        response = await call_next(request)
+        for name, value in service.timing_headers().items():
+            response.headers[name] = value
+        return response
 
     @app.get("/health")
     async def health():
@@ -550,6 +590,17 @@ def create_app(settings: Settings | None = None, start: bool = True) -> FastAPI:
             "denoise": info.get("denoise"),
             "workers": len(service.workers),
             "queue": service.waiting,
+            "bootMs": (
+                round((service.boot_ready - service.boot_started) * 1000)
+                if service.boot_ready is not None
+                else None
+            ),
+            "containerAgeMs": (
+                round((time.perf_counter() - service.boot_ready) * 1000)
+                if service.boot_ready is not None
+                else None
+            ),
+            "responses": service.responses,
         }
 
     async def bounded_body(request: Request, limit: int):

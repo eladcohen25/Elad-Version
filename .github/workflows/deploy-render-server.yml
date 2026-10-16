@@ -1,0 +1,81 @@
+name: Deploy render server
+# Deploys render-server/modal_app.py to Modal whenever the server changes on main or showroom,
+# or on demand. The gateway's URL is printed in the job summary: set it as
+# VITE_CLOUD_RENDER_URL on the Vercel project so the app renders its stills on the GPU.
+#
+# Secrets (repository → Settings → Secrets and variables → Actions):
+#   MODAL_TOKEN_ID, MODAL_TOKEN_SECRET   required (Modal dashboard → Settings → API tokens)
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, FURY_FRAME_BUCKET, FURY_FRAME_ENDPOINT
+#                                        optional: the durable frame store (R2 or S3)
+# Variables (same page, "Variables" tab), all optional:
+#   FURY_ALLOWED_ORIGINS   CORS regex; defaults to this project's Vercel domains and localhost
+#   FURY_APP_NAME          Modal app name, default fury-render
+#   FURY_GPU               default L40S (one per visitor session)
+#   FURY_MAX_SESSIONS      default 3
+#   FURY_IDLE_SECONDS      default 180 (a GPU stays warm 3 min after its last request)
+on:
+  push:
+    branches: [main, showroom]
+    paths:
+      - 'render-server/**'
+      - '.github/workflows/deploy-render-server.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: deploy-render-server
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: render-server
+    env:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      FURY_ALLOWED_ORIGINS: ${{ vars.FURY_ALLOWED_ORIGINS || '^https://elad-version(-[a-z0-9-]+)?(-eladcohen25s-projects)?\.vercel\.app$|^http://(localhost|127\.0\.0\.1)(:\d+)?$' }}
+      FURY_APP_NAME: ${{ vars.FURY_APP_NAME || 'fury-render' }}
+      FURY_GPU: ${{ vars.FURY_GPU || 'L40S' }}
+      FURY_MAX_SESSIONS: ${{ vars.FURY_MAX_SESSIONS || '3' }}
+      FURY_IDLE_SECONDS: ${{ vars.FURY_IDLE_SECONDS || '180' }}
+      FURY_FRAME_BUCKET: ${{ secrets.FURY_FRAME_BUCKET }}
+      FURY_FRAME_ENDPOINT: ${{ secrets.FURY_FRAME_ENDPOINT }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the Modal token is configured
+        run: |
+          if [ -z "$MODAL_TOKEN_ID" ] || [ -z "$MODAL_TOKEN_SECRET" ]; then
+            echo "::error::Add MODAL_TOKEN_ID and MODAL_TOKEN_SECRET as repository secrets (Settings → Secrets and variables → Actions)."
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install modal==1.1.4
+      - name: Deploy to Modal
+        run: |
+          set -o pipefail
+          modal deploy modal_app.py 2>&1 | tee deploy.log
+      - name: Report the gateway URL
+        run: |
+          URL=$(grep -oE 'https://[a-z0-9.-]+\.modal\.run' deploy.log | head -1 || true)
+          {
+            echo "## Render server deployed"
+            echo
+            echo "- App: \`$FURY_APP_NAME\` · GPU per session: \`$FURY_GPU\` · sessions: $FURY_MAX_SESSIONS · idle: ${FURY_IDLE_SECONDS}s"
+            if [ -n "$FURY_FRAME_BUCKET" ]; then echo "- Frame store: bucket \`$FURY_FRAME_BUCKET\`"; else echo "- Frame store: Modal volume only (no bucket configured)"; fi
+            echo "- Allowed origins: \`$FURY_ALLOWED_ORIGINS\`"
+            if [ -n "$URL" ]; then
+              echo
+              echo "**Gateway URL:** \`$URL\`"
+              echo
+              echo "Set \`VITE_CLOUD_RENDER_URL=$URL\` on the Vercel project (Preview and Production) and redeploy the app."
+            else
+              echo
+              echo "Gateway URL not found in the deploy output; see the log above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

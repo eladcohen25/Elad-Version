@@ -128,3 +128,20 @@ def test_blob_store_prunes_oldest_beyond_budget(tmp_path):
     # A new store on the same directory (a container starting cold) sees what is there.
     again = BlobStore(str(tmp_path), budget=250)
     assert again.total == 200 and again.has(keys[2])
+
+
+def test_service_reports_cold_start_on_its_first_responses(tmp_path):
+    """Every response says how long boot took and how old the container is; the first few after
+    boot are marked cold, so the browser's timeline can tell a cold GPU from a slow one."""
+    import time
+
+    from fury_render.api import COLD_RESPONSES, Service, Settings
+
+    service = Service(Settings(blob_dir=str(tmp_path / "b"), frame_dir=str(tmp_path / "f")))
+    # Not started yet: no boot time to report, but the first responses still count as cold.
+    assert service.timing_headers() == {"X-Cold": "1"}
+    service.boot_ready = time.perf_counter()
+    headers = [service.timing_headers() for _ in range(COLD_RESPONSES + 1)]
+    assert all("X-Cold" in h for h in headers[: COLD_RESPONSES - 1])
+    assert "X-Cold" not in headers[-1]
+    assert int(headers[-1]["X-Boot-Ms"]) >= 0 and int(headers[-1]["X-Container-Age-Ms"]) >= 0
