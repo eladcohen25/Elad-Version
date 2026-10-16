@@ -54,11 +54,20 @@ import type { TraceState } from './traceStatus'
 /** `?traceStats=1` logs, per view, when the first traced image appeared and when it settled. */
 const TRACE_STATS = new URLSearchParams(window.location.search).get('traceStats') === '1'
 
-/** Samples per pixel at which a resting view stops refining. */
-export const REST_SAMPLES = 1024
+/**
+ * Samples per pixel at which a resting view stops refining. With the denoiser, 256 is visually
+ * settled at screen resolution; going on to 1024 kept the GPU at full load for the better part
+ * of a minute on a laptop (fans spinning, battery draining) for no visible gain.
+ */
+export const REST_SAMPLES = 256
 /** Samples per pixel an exported still waits for (or until EXPORT_TIMEOUT_MS). */
-export const EXPORT_SAMPLES = 384
-export const EXPORT_TIMEOUT_MS = 45000
+export const EXPORT_SAMPLES = 256
+export const EXPORT_TIMEOUT_MS = 30000
+/**
+ * A resting view stops refining after this long even if REST_SAMPLES is not reached: a slow GPU
+ * is not asked to run flat out indefinitely for a view the visitor may already have moved on from.
+ */
+export const REST_TIME_MS = 10000
 
 type TracerModule = typeof import('three-gpu-pathtracer/webgpu')
 type Modules = { tracer: TracerModule; initUNetFromURL: unknown }
@@ -341,7 +350,7 @@ function zeroFill(renderer: WebGPURenderer, texture: Texture) {
  * Accumulation milestones at which the image is denoised and crossfaded in. They double, so
  * each denoised image can be compared with the last to find the regions that have settled.
  */
-const MILESTONES = [8, 16, 32, 64, 128, 256, 512, REST_SAMPLES]
+const MILESTONES = [8, 16, 32, 64, 128, 256, 512, 1024].filter((m) => m <= REST_SAMPLES)
 /**
  * A view seeded from the previous one is mostly converged from the start; only what that view did
  * not show is new, so its first image is denoised almost at once.
@@ -421,8 +430,10 @@ export class PathTraceSession {
     const module = modules.tracer
     const tracer = new module.WebGPUPathTracer(renderer)
     tracer.frameBudget = FRAME_BUDGET
-    tracer.maxBounces = 10
-    tracer.maxTransparentBounces = 12
+    // Six bounces: a unit under an open sky gathers nearly all its light in three or four, and
+    // each extra bounce costs a full pass. (The cloud renderer keeps its own bounce settings.)
+    tracer.maxBounces = 6
+    tracer.maxTransparentBounces = 8
     tracer.filterGlossyFactor = 0.5
     tracer.transmissiveBackground = module.TRANSMISSIVE_BACKGROUND_ENVIRONMENT
     // The session crossfades from the raster image itself, so skip the tracer's low-res preview.
@@ -561,6 +572,9 @@ export class PathTraceSession {
     // without this the GPU queue would grow without bound.
     // Raw (undenoised) display keeps presenting through the tracer until its fade completes.
     const fading = !this.denoising && this.tracer.fadeState < 1
+    // Out of time for this view: keep what has been gathered and let the denoised image stand.
+    if (this.accumulating && now - this.timing.start > REST_TIME_MS && this.samples >= 8)
+      this.accumulating = false
     if ((this.accumulating || fading) && !this.inFlight) {
       const previous = this.renderer.getRenderTarget()
       this.renderer.setRenderTarget(this.sink)

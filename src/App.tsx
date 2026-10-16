@@ -55,7 +55,7 @@ import {
 } from './lib/config'
 import { useConfig } from './lib/useConfig'
 import { productFamily } from './lib/products'
-import { defaultQuality, type Backend, type Quality } from './render/quality'
+import { defaultQuality, onBattery, type Backend, type Quality } from './render/quality'
 import {
   cloudUrl,
   requestedTrace,
@@ -82,6 +82,18 @@ export default function App() {
     )
   // An explicit choice (panel or ?quality=) is never overridden by the performance governor.
   const qualityChosen = useRef(new URLSearchParams(window.location.search).has('quality'))
+  // On battery, path tracing on this device is off unless asked for: it runs the GPU flat out.
+  // A cloud renderer does the work elsewhere, so it stays on.
+  useEffect(() => {
+    if (requestedTrace() !== null || cloudUrl() !== null) return
+    let cancelled = false
+    onBattery().then((battery) => {
+      if (!cancelled && battery) setTrace(false)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
   const [dialog, setDialog] = useState<Dialog>(null),
     [toast, setToast] = useState(initialNotice),
     [reset, setReset] = useState(0)
