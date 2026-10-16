@@ -50,6 +50,7 @@ import {
   money,
   productName,
   productHeight,
+  type Config,
   type SignatureId,
   type Unit,
   type View,
@@ -74,6 +75,7 @@ import {
   firstAngle,
   stepAngle,
 } from './render/angles'
+import { prewarmDesigns, prewarmRange } from './render/prewarm'
 
 const Scene = lazy(() =>
   import('./components/Scene').then((m) => {
@@ -125,6 +127,7 @@ export default function App() {
     setView(next.view)
     setAutoRotate(false)
   }, [])
+  usePrewarm(setConfig, setCamera, setAngle, setView)
   const captureRef = useRef<(() => Promise<string>) | null>(null),
     timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const notify = useCallback((s: string) => {
@@ -631,6 +634,93 @@ export default function App() {
     </div>
   )
 }
+declare global {
+  interface Window {
+    __furyPrewarm?: {
+      total: number
+      from: number
+      to: number
+      done: number
+      current: string
+      finished: boolean
+      timedOut: string[]
+    }
+  }
+}
+
+/** A design's stills are all at full quality when every angle is final. */
+const PREWARM_DESIGN_TIMEOUT_MS = 180_000
+
+/**
+ * `?prewarm=1` (or `?prewarm=<from>-<to>`): steps through prewarmDesigns, applying each and
+ * waiting until every showroom still of it is rendered at full quality (or a timeout), so the
+ * frame store holds them for visitors. Progress is on window.__furyPrewarm for scripts/prewarm.mjs.
+ */
+function usePrewarm(
+  setConfig: (config: Config) => void,
+  setCamera: (camera: [number, number, number]) => void,
+  setAngle: (angle: string) => void,
+  setView: (view: View) => void,
+) {
+  const spin = useSpinStatus()
+  const designs = useMemo(() => prewarmDesigns(), [])
+  const range = useMemo(() => prewarmRange(designs.length), [designs.length])
+  const at = useRef(range ? range[0] : 0)
+  const startedAt = useRef(0)
+  const applied = useRef(false)
+  const timedOut = useRef<string[]>([])
+  useEffect(() => {
+    if (!range) return
+    const [from, to] = range
+    const report = (current: string, finished = false) => {
+      window.__furyPrewarm = {
+        total: designs.length,
+        from,
+        to,
+        done: at.current - from,
+        current,
+        finished,
+        timedOut: timedOut.current,
+      }
+    }
+    const apply = () => {
+      if (at.current >= to) {
+        report('', true)
+        console.info(
+          `[prewarm] finished ${to - from} designs (${timedOut.current.length} timed out)`,
+        )
+        return
+      }
+      const design = designs[at.current]
+      setConfig(design.config)
+      setCamera(design.camera)
+      setAngle(DEFAULT_ANGLE)
+      setView('exterior')
+      startedAt.current = performance.now()
+      applied.current = true
+      report(design.label)
+      console.info(`[prewarm] ${at.current + 1}/${to}: ${design.label}`)
+    }
+    if (!applied.current) {
+      apply()
+      return
+    }
+    // The current design is done once every still is final; the spin status counts them.
+    const complete = spin.active && spin.total > 0 && spin.final >= spin.total
+    const late = performance.now() - startedAt.current > PREWARM_DESIGN_TIMEOUT_MS
+    if (complete || late || spin.failed) {
+      if (late && !complete) timedOut.current.push(designs[at.current].label)
+      if (spin.failed) {
+        console.warn('[prewarm] the cloud renderer is unavailable; stopping.')
+        report(designs[at.current].label, true)
+        return
+      }
+      at.current++
+      apply()
+    }
+  }, [range, designs, spin, setConfig, setCamera, setAngle, setView])
+}
+
 /**
  * Covers the scene while the cloud path traces the spin, so the first view seen is the finished
  * one: on opening until the view is ready at full quality and the angles either side of it as

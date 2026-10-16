@@ -65,6 +65,34 @@ Stop a test with `modal app stop <app-name>` and confirm zero tasks with `modal 
 Never raise gateway `max_containers` above 1 without replacing the in-memory limits and the
 session registry with shared durable counters.
 
+## Frame store
+
+Showroom stills (src/render/angles.ts) are fixed cameras, so a finished frame is the right image for
+everyone who looks at the same design from the same angle. `fury_render/frames.py` keeps every
+finished frame in an S3-compatible bucket in front of the renderer's volume: the renderer reads the
+volume, then the bucket (back-filling the volume), and writes both; the **gateway** checks the bucket
+first for `output: "frame"` requests and answers a hit itself, with `X-Cache: hit` and
+`X-Cache-Store: gateway`, so a repeat never wakes a GPU. Configure at deploy time:
+
+| Variable                                      | Meaning                                          |
+| --------------------------------------------- | ------------------------------------------------ |
+| `FURY_FRAME_BUCKET`                           | Bucket name (unset: volume only)                 |
+| `FURY_FRAME_ENDPOINT`                         | S3-compatible endpoint (Cloudflare R2, MinIO, …) |
+| `FURY_FRAME_PREFIX`                           | Key prefix, default `frames/`                    |
+| `FURY_FRAME_REGION`                           | Region, default `auto`                           |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Credentials                                      |
+
+Cloudflare R2 works well: `FURY_FRAME_ENDPOINT=https://<account>.r2.cloudflarestorage.com`,
+`FURY_FRAME_REGION=auto`. A frame is about 0.2 MB; the popular space below is under 2 GB.
+
+### Pre-warming
+
+`npm run prewarm -- https://<deploy>.vercel.app [--pages 3]` (needs `npx playwright install chrome`)
+opens the app with `?prewarm=…`, which steps through the five signature builds in every finish,
+setting and time of day (src/render/prewarm.ts, about 840 designs) and renders every angle's
+still. Roughly 10 s of GPU time per design: 2.5 hours on one GPU, so `--pages 3` with
+`FURY_MAX_SESSIONS=3` finishes overnight. Run it after a catalog or material change.
+
 ## Timing
 
 Every response carries `X-Boot-Ms` (how long the container took to become ready) and

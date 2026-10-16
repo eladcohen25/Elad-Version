@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse, Response
 
 from . import finishing
 from . import worker as worker_module
+from .frames import FrameCache, remote_frames_from_env
 from .protocol import (
     HASH,
     IMAGE_FORMAT,
@@ -354,7 +355,10 @@ class Service:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or Settings()
         self.store = BlobStore(self.settings.blob_dir, self.settings.blob_budget)
-        self.frames = BlobStore(self.settings.frame_dir, self.settings.frame_budget)
+        # Finished frames: the volume in front of the durable bucket, when one is configured.
+        self.frames = FrameCache(
+            BlobStore(self.settings.frame_dir, self.settings.frame_budget), remote_frames_from_env()
+        )
         self.finisher = ThreadPoolExecutor(self.settings.finish_threads)
         count = max(1, self.settings.workers)
         self.workers = [Worker(self.settings, i if count > 1 else None) for i in range(count)]
@@ -564,6 +568,7 @@ def create_app(settings: Settings | None = None, start: bool = True) -> FastAPI:
             "x-cold",
             "x-boot-ms",
             "x-container-age-ms",
+            "x-cache-store",
         ],
         max_age=3600,
     )
