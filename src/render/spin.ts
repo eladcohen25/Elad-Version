@@ -20,6 +20,7 @@ import {
 } from './cloud'
 import { ORBIT_LIMITS } from './orbit'
 import { lookKey } from './pathtrace'
+import { mark, markOnce, now as timelineNow, resetOnce, timelineEnabled } from './timeline'
 
 /**
  * The path-traced spin. With a cloud renderer the exterior is never shown with the real-time
@@ -333,6 +334,8 @@ export class SpinSession {
     this.inFlight = new Set()
     this.failures = 0
     if (design !== this.design) {
+      mark(this.design ? 'spin-design-changed' : 'spin-first-design', { sceneKey, lighting })
+      resetOnce('spin-')
       this.design = design
       this.frames.clear()
       for (const d of this.decoded.values()) if (!(d instanceof Promise)) this.doom(d.texture)
@@ -402,8 +405,10 @@ export class SpinSession {
     camera: CloudCamera | null,
     label: string,
   ) {
+    mark(`spin-meter-${label}-raster-wanted`)
     const raster = await rasterKey(camera)
     const scale = Math.min(1, MAX_EDGE / Math.max(raster.width, raster.height))
+    mark(`spin-meter-${label}-sent`, { width: raster.width, height: raster.height })
     const frame = await this.client.frame(
       captured,
       {
@@ -418,6 +423,7 @@ export class SpinSession {
       },
       this.closed.signal,
     )
+    mark(`spin-meter-${label}-answered`, { ...frame.timing, totalMs: Math.round(frame.totalMs) })
     const traced = frame.tracedKey
     const ratio = Math.exp(raster.key - traced)
     if (!Number.isFinite(ratio)) throw new Error(`no exposure reading (${raster.key}, ${traced})`)
@@ -539,6 +545,8 @@ export class SpinSession {
       gain: job.inside ? this.gain!.interior : this.gain!.exterior,
     }
     inFlight.add(id)
+    const sentAt = timelineNow()
+    markOnce('spin-first-frame-sent', { key: job.key, final: job.final, focus: job.focus })
     this.captured!.then((captured) =>
       this.client.frame(
         captured,
@@ -556,10 +564,21 @@ export class SpinSession {
     )
       .then((frame) => {
         if (generation !== this.generation) return
-        if (TRACE_STATS)
+        if (TRACE_STATS) {
+          const name = job.key.split('|').slice(-2).join('/') || 'panorama'
           console.info(
-            `[spin] ${job.key.split('|').slice(-2).join('/') || 'panorama'} ${job.final ? 'final' : 'preview'} ${job.width}x${job.height}: ${frame.cached ? 'cached' : `render ${frame.renderMs} ms`}, ${Math.round(frame.totalMs)} ms in all`,
+            `[spin] ${name} ${job.final ? 'final' : 'preview'} ${job.width}x${job.height}: ${frame.cached ? 'cached' : `render ${frame.renderMs} ms`}, ${Math.round(frame.totalMs)} ms in all`,
           )
+          markOnce('spin-first-frame-answered', { key: job.key, ...frame.timing })
+          mark('spin-frame', {
+            frame: name,
+            final: job.final,
+            focus: job.focus,
+            size: `${job.width}x${job.height}`,
+            waitMs: timelineNow() - sentAt,
+            ...frame.timing,
+          })
+        }
         const stored = this.frames.get(job.key) ?? {}
         stored[job.final ? 'final' : 'preview'] = frame.image
         this.frames.set(job.key, stored)
@@ -661,6 +680,7 @@ export class SpinSession {
     }
     // Ready once all of that is, or the loading screen has waited long enough.
     const loading = waitReady < waitTotal && performance.now() - this.started < LOADING_TIMEOUT_MS
+    if (timelineEnabled) this.logWait(loading, waitReady, waitTotal)
     this.progress = {
       loading,
       ready,
@@ -669,6 +689,50 @@ export class SpinSession {
       waitReady,
       waitTotal,
       failed: this.progress.failed,
+    }
+  }
+
+  /** The last time the loading screen's wait was logged, and whether it was waiting. */
+  private waitLog = { at: 0, waiting: false }
+
+  /**
+   * `?traceStats=1`: while the loading screen is up, every 2 s says what it waits on; when it
+   * lifts, one summary line (how long, and whether it gave up).
+   */
+  private logWait(loading: boolean, waitReady: number, waitTotal: number) {
+    const state = this.state!
+    const waited = Math.round(performance.now() - this.started)
+    if (loading) {
+      if (performance.now() - this.waitLog.at < 2000) return
+      this.waitLog = { at: performance.now(), waiting: true }
+      const missing: string[] = []
+      if (state.active === 'interior') {
+        const p = this.frames.get(this.interiorKey())
+        missing.push(p ? 'panorama final' : 'panorama preview')
+      } else if (state.exterior) {
+        const { level, azimuth } = state.exterior.pose
+        const [focus, ...near] = ringOrder(azimuth).slice(0, 1 + 2 * NEAR)
+        const f = this.frames.get(this.exteriorKey({ level, azimuth: focus }))
+        if (!f?.final) missing.push(f ? 'focus final' : 'focus preview')
+        const gaps = near.filter((a) => !this.frames.has(this.exteriorKey({ level, azimuth: a })))
+        if (gaps.length) missing.push(`near previews ${gaps.join(',')}`)
+      }
+      mark('spin-waiting', {
+        waitedMs: waited,
+        ready: `${waitReady}/${waitTotal}`,
+        waitingOn: missing.join('; '),
+        inFlight: [...this.inFlight],
+        metering: this.metering !== '',
+        gain: this.gain !== null,
+      })
+    } else if (this.waitLog.waiting) {
+      this.waitLog = { at: 0, waiting: false }
+      mark('spin-loading-lifted', {
+        waitedMs: waited,
+        gaveUp: waitReady < waitTotal,
+        ready: `${waitReady}/${waitTotal}`,
+        view: state.active,
+      })
     }
   }
 

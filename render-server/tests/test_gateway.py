@@ -242,3 +242,37 @@ def test_sessions_beyond_the_limit_render_on_their_own(monkeypatch):
         assert post("session-cc").status_code == 200
         assert post("session-bb").json()["full"] is True
     assert calls == ["session-aa", "session-bb", "session-aa", "session-cc"]
+
+
+def test_timing_headers_and_health_report_sessions():
+    """The gateway stamps its dispatch time on every forwarded response, and /health reports the
+    session table and, for a session holding a GPU, that renderer's own state."""
+    calls = []
+
+    async def dispatch(method, path, body, client, session):
+        calls.append((method, path, session))
+        if path == "/health":
+            return 200, {}, json.dumps({"ok": True, "device": "OPTIX", "bootMs": 12345}).encode()
+        return 200, {"x-render-ms": "7", "x-cold": "1"}, b"result"
+
+    app = create_gateway(dispatch, r"^https://test\.example$", max_sessions=2)
+    with TestClient(app) as client:
+        # Before any render: the table is empty and no GPU is asked anything.
+        health = client.get("/health").json()
+        assert health["sessions"] == {"limit": 2, "active": 0, "idleSeconds": 120, "ages": {}}
+        assert "renderer" not in health
+        # A session that has not rendered gets no renderer report (that would start a GPU).
+        assert "renderer" not in client.get("/health?session=abcdefgh").json()
+        assert calls == []
+
+        response = client.post("/render?session=abcdefgh", json=request(Kit().scene()))
+        assert response.status_code == 200
+        assert int(response.headers["x-dispatch-ms"]) >= 0
+        # The renderer's own cold-start headers pass through.
+        assert response.headers["x-cold"] == "1" and response.headers["x-render-ms"] == "7"
+
+        health = client.get("/health?session=abcdefgh").json()
+        assert health["sessions"]["active"] == 1 and "abcdefgh" in health["sessions"]["ages"]
+        assert health["renderer"] == {"ok": True, "device": "OPTIX", "bootMs": 12345}
+        assert health["rendererMs"] >= 0
+        assert calls[-1] == ("GET", "/health", "abcdefgh")
