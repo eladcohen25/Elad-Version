@@ -41,6 +41,7 @@ import {
 } from './orbit'
 import { createExposureMeter } from './pipeline'
 import { cloudUrl, type TraceState } from './traceStatus'
+import { mark, markOnce, responseTiming, type Mark } from './timeline'
 
 export { cloudUrl }
 
@@ -671,6 +672,7 @@ export class CloudClient {
 
   constructor(url: string) {
     this.url = url
+    markOnce('cloud-client-created', { url, session: RENDER_SESSION })
   }
 
   /** True while the server has rendered recently enough that its GPU is likely still on. */
@@ -805,12 +807,19 @@ export class CloudClient {
     if (!(response.headers.get('content-type') ?? '').startsWith('image/'))
       throw new Outdated('the render server does not finish spin frames; redeploy it')
     const header = (name: string) => Number(response.headers.get(name) ?? 0)
+    const answered = performance.now()
+    const image = await response.blob()
     return {
-      image: await response.blob(),
+      image,
       cached: response.headers.get('x-cache') === 'hit',
       renderMs: header('x-render-ms'),
       totalMs: performance.now() - start,
       tracedKey: Number(response.headers.get('x-traced-key') ?? NaN),
+      timing: {
+        ...responseTiming(response.headers),
+        transferMs: Math.round(performance.now() - answered),
+        bytes: image.size,
+      },
     }
   }
 
@@ -819,20 +828,37 @@ export class CloudClient {
     const encoded = new TextEncoder().encode(JSON.stringify({ ...fields, scene: captured.scene }))
     const payload = encoded.byteLength > 32 * 1024 ? await gzip(encoded) : encoded
     for (let attempt = 0; attempt < 3; attempt++) {
+      markOnce('cloud-first-render-sent', { bytes: payload.byteLength })
+      const sent = performance.now()
       const response = await fetch(`${this.url}/render?session=${RENDER_SESSION}`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: payload as BodyInit,
         signal,
       })
+      const timing = responseTiming(response.headers)
+      markOnce('cloud-first-response', {
+        status: response.status,
+        roundTripMs: Math.round(performance.now() - sent),
+        ...timing,
+      })
+      if (timing.cold !== undefined) markOnce('cloud-cold-start-seen', { ...timing })
       if (response.status === 409) {
         const answer = (await response.json()) as { missing?: string[]; superseded?: boolean }
         if (answer.superseded) throw new Superseded()
         if (answer.missing?.length) {
+          mark('cloud-uploading-blobs', { count: answer.missing.length })
+          const uploading = performance.now()
           await this.upload(answer.missing, captured.blobs, signal)
+          mark('cloud-blobs-uploaded', {
+            count: answer.missing.length,
+            ms: Math.round(performance.now() - uploading),
+          })
           continue
         }
       }
+      if (response.ok)
+        markOnce('cloud-first-render-answered', { status: response.status, ...timing })
       if (response.status === 503) {
         const answer = (await response.json().catch(() => null)) as { full?: boolean } | null
         if (answer?.full) throw new Full('every cloud GPU is in use')
@@ -857,6 +883,8 @@ export type SpinFrame = {
   renderMs: number
   totalMs: number
   tracedKey: number
+  /** The server's timing headers (timeline.ts responseTiming), for `?traceStats=1`. */
+  timing: Mark['extra']
 }
 
 // Session --------------------------------------------------------------------------------------
