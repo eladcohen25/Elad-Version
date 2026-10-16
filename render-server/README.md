@@ -65,6 +65,17 @@ Stop a test with `modal app stop <app-name>` and confirm zero tasks with `modal 
 Never raise gateway `max_containers` above 1 without replacing the in-memory limits and the
 session registry with shared durable counters.
 
+## Timing
+
+Every response carries `X-Boot-Ms` (how long the container took to become ready) and
+`X-Container-Age-Ms` (how long ago that was); the first three responses after a boot also carry
+`X-Cold: 1`. The gateway adds `X-Dispatch-Ms`, its wall time waiting on the GPU call, so
+`X-Dispatch-Ms − X-Queue-Ms − X-Render-Ms` is Modal scheduling plus a cold container starting.
+`GET /health` on the gateway reports its session table, and `GET /health?session=<id>` adds that
+session's renderer state (device, denoiser, queue, boot time) when the session already holds a
+GPU; it never starts one. Container boot phases print to `modal app logs` as `boot[<session>]:`.
+The browser's `?traceStats=1` timeline reads all of these.
+
 ## Limits and caveats
 
 - Scene data (geometry, textures, sky) is stored on the `fury-render-cache` volume, shared by every

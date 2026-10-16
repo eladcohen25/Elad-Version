@@ -64,8 +64,14 @@ import {
   useTraceStatus,
 } from './render/traceStatus'
 import { textureProgress } from './render/progress'
+import { mark } from './render/timeline'
 
-const Scene = lazy(() => import('./components/Scene'))
+const Scene = lazy(() =>
+  import('./components/Scene').then((m) => {
+    mark('scene-chunk-loaded')
+    return m
+  }),
+)
 type Dialog = 'share' | 'brief' | 'estimate' | 'library' | 'help' | null
 
 export default function App() {

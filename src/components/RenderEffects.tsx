@@ -54,6 +54,7 @@ import { backendOf } from '../render/renderer'
 import { TraceSession } from '../render/session'
 import { textureProgress } from '../render/progress'
 import { setPrerenderProgress, setSpinStatus, setTraceStatus } from '../render/traceStatus'
+import { mark, markOnce } from '../render/timeline'
 
 /** Median frame time (ms) of a settle run above which a tier is too heavy for this device. */
 const SLOW_FRAME_MS: Record<Quality, number> = { ultra: 50, high: 75, lite: Infinity }
@@ -434,6 +435,13 @@ export function RenderEffects({
       const frame = spinning.session.texture()
       const shown = spinShown.current
       if (frame && frame !== shown.frame) {
+        if (spinning.session.isFocus(frame))
+          markOnce(`spin-focus-${frame.final ? 'final' : 'preview'}-shown`, {
+            key: frame.key,
+            final: frame.final,
+            view: looking,
+          })
+        else markOnce('spin-nearest-frame-shown', { key: frame.key, view: looking })
         // A better image of the same frame, or the first one after a design change, fades in;
         // stepping to the next frame of the spin cuts to it.
         const fades =
@@ -515,7 +523,10 @@ export function RenderEffects({
       const refining = tracer.step()
       const traced = tracer.view(now)
       // Until the first traced image is ready the canvas keeps the last raster frame.
-      if (traced.from || traced.t > 0) present.current!.render(traced)
+      if (traced.from || traced.t > 0) {
+        markOnce('first-traced-image', { source: tracer.source, samples: tracer.samples, view })
+        present.current!.render(traced)
+      }
       const capture = pending.current
       if (capture && (tracer.ready(EXPORT_SAMPLES) || now > capture.deadline))
         deliver(renderer.domElement.toDataURL('image/png'))
@@ -534,6 +545,7 @@ export function RenderEffects({
           ? { target: controls.target.clone() }
           : null
       tracer.begin(scene, camera, lookRef.current, active.hdr, REST_SAMPLES, orbit)
+      mark('trace-begin', { source: tracer.source, view })
       report(true)
       invalidate()
       return
@@ -543,6 +555,7 @@ export function RenderEffects({
     const chained = settle.current > 0
     if (settle.current <= 0) settle.current = active.settleFrames
     active.render()
+    markOnce('first-raster-frame', { quality, view })
     fresh.current = true
     settle.current--
     still.current++

@@ -82,14 +82,26 @@ class Renderer:
 
     @modal.enter()
     def start(self):
+        # Boot phases are timed and printed, so `modal app logs` shows what a cold start costs:
+        # importing Blender, configuring the device and compiling kernels, the warm-up render.
+        import time
+
+        t0 = time.perf_counter()
+        phase = lambda name: print(
+            f"boot[{self.session}]: {name} at {round((time.perf_counter() - t0) * 1000)} ms"
+        )  # noqa: E731
+        phase("container entered")
         # Set cache paths after volume mounting, not while the image is being built.
         os.environ.update(environment)
         from fury_render.api import create_app
 
+        phase("api imported")
         self.web_app = create_app(start=False)
+        phase("app created; starting workers (bpy import, device, warm-up)")
         info = self.web_app.state.service.start()
-        print("renderer ready:", info)
+        phase(f"renderer ready: {info}")
         cache.commit()
+        phase("volume committed")
 
     @modal.method()
     async def request(self, method: str, path: str, body: bytes, client: str):

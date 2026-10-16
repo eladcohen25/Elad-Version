@@ -9,7 +9,10 @@ import '@fontsource/dm-sans/latin-400.css'
 import '@fontsource/dm-sans/latin-500.css'
 import '@fontsource/dm-sans/latin-600.css'
 import App from './App'
+import { mark } from './render/timeline'
 import './styles.css'
+
+mark('page-load', { href: location.href })
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
